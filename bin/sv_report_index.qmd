@@ -1,0 +1,3701 @@
+---
+title: "T-ALL WGS Nanopore Annotation Report"
+format:
+  dashboard:
+    theme: cerulean
+    orientation: rows
+    scrolling: false
+    embed-resources: true
+knitr:
+  opts_chunk:
+    fig.align: 'center'
+    tidy: TRUE
+    fig.width: 7
+    fig.height: 5
+    R.options:
+      stringsAsFactors: FALSE
+params:
+  meta_data: ""
+  candidate_genes: ""
+  ensembl_db: ""
+  disco_enable: true
+  proteinpaint_host: "http://localhost:3456"
+  proteinpaint_genome: "hg38"
+  # COHORT_MERGE_SV outputs. Empty on pass 1 of the two-pass render; the cohort
+  # section then shows an explanatory card instead of the tables.
+  cohort_recurrent_tsv: ""
+  cohort_merged_vcf: ""
+cache: true
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+.libPaths(c(getwd(),.libPaths()))
+
+.pkg_lib <- file.path(getwd(), "R_runtime_libs")
+dir.create(.pkg_lib, showWarnings = FALSE, recursive = TRUE)
+.libPaths(c(.pkg_lib, .libPaths()))
+
+.pkg_repos <- local({
+  r <- getOption("repos")
+  r <- r[!is.na(r) & nzchar(r) & r != "@CRAN@"]
+  if (length(r) == 0) c(CRAN = "https://cloud.r-project.org")
+  else unique(c(r, CRAN = "https://cloud.r-project.org"))
+})
+
+install_if_missing <- function(pkg, required = TRUE) {
+  if (requireNamespace(pkg, quietly = TRUE)) return(invisible(TRUE))
+  try(install.packages(pkg, repos = .pkg_repos, quiet = TRUE, lib = .pkg_lib),
+      silent = TRUE)
+  ok <- requireNamespace(pkg, quietly = TRUE)
+  if (!ok && isTRUE(required)) {
+    stop(sprintf(paste0(
+      "Required R package '%s' is missing and could not be installed.\n",
+      "  repos tried : %s\n",
+      "  lib target  : %s\n",
+      "This host has no working route to a package repository. Either bake '%s'\n",
+      "into the SV_REPORT_INDEX container image (preferred - see the TODO below),\n",
+      "or export http_proxy/https_proxy for the task so the runtime install works."),
+      pkg, paste(.pkg_repos, collapse = ", "), .pkg_lib, pkg), call. = FALSE)
+  }
+  invisible(ok)
+}
+install_if_missing("DT")
+install_if_missing("plotly")
+
+# Runtime Bioconductor install — used for the optional EnsDb breakend
+# annotation block. Rocker/verse ships a P3M repos config so BiocManager
+# prefers binaries when available, keeping cold install closer to seconds
+# than compile-from-source minutes. Wrapped in tryCatch so a repo miss or
+# transient network hiccup falls back to the downstream `requireNamespace`
+# gate rather than killing the whole render.
+# TODO: bake ensembldb + plyranges into a custom SV_REPORT_INDEX container
+# image so this runtime install can be removed.
+install_bioc_if_missing <- function(pkg) {
+  if (requireNamespace(pkg, quietly = TRUE)) return(invisible(TRUE))
+  tryCatch({
+    if (!requireNamespace("BiocManager", quietly = TRUE)) {
+      install.packages("BiocManager", repos = .pkg_repos,
+                       quiet = TRUE, lib = .pkg_lib)
+    }
+    BiocManager::install(pkg, update = FALSE, ask = FALSE, quiet = TRUE,
+                         lib = .pkg_lib)
+    invisible(TRUE)
+  }, error = function(e) {
+    message("Optional Bioc install skipped for '", pkg, "': ",
+            conditionMessage(e))
+    invisible(FALSE)
+  })
+}
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(DT)
+  library(plotly)
+})
+
+#  Reusable predicates / normalizers (tidyverse-patterns) 
+# True iff x has real annotation content (handles NA, "", ".", "NA", "()").
+is_meaningful <- function(x) {
+  !is.na(x) & !(x %in% c("", ".", "NA", "()"))
+}
+
+# Strip InfoTuple-style "(...)" / quote decoration from a vembrane TSV cell and
+# return the first element as a clean string. Splits on EITHER `,` or `;`. The `,` handles raw vembrane InfoTuple input like "('5', 'full=5')" while `;` handles the output like "5; full=5; full=5"
+# scalar_first applied value returns the entire joined string and downstream as.integer() / factor() match returns NA.
+scalar_first <- function(x) {
+  cleaned <- str_replace_all(as.character(x), "[()'\"\\s]", "")
+  str_split_fixed(cleaned, "[,;]", 2)[, 1]
+}
+
+# Cast ACMG_class to an ordered factor for plot ordering and color mapping.
+# NA-like inputs (R-NA, empty string, ".", literal "NA") are normalized to the
+# explicit "NA" factor level so plots can render them as grey via the
+# acmg_palette mapping below (true-NA factor values would render transparent
+# under scale_fill_viridis_d).
+acmg_factor <- function(x) {
+  s <- scalar_first(x)
+  s[is.na(s) | s %in% c("", ".", "NA")] <- "NA"
+  factor(s, levels = c("0", "1", "2", "3", "4", "5", "NA"))
+}
+
+# Strict ACMG cleaner for the cohort TSV: returns integer 1-5 or NA_integer_.
+# Coerces 0 (AnnotSV "unclassified") and any non-1-5 value to NA. Designed to
+# overwrite the raw ACMG_class column in the cohort TSV — NOT a replacement
+# for acmg_factor(), which intentionally keeps "0" / "NA" as factor levels
+# for plot color mapping.
+acmg_clean <- function(x) {
+  s <- scalar_first(x)
+  n <- suppressWarnings(as.integer(s))
+  ifelse(is.na(n) | n < 1L | n > 5L, NA_integer_, n)
+}
+
+# Color palette: viridis "rocket" ramp for ACMG classes 0–5, grey for "NA".
+# Used by Plot 2 (ACMG class stacked bars) via scale_fill_manual so the
+# NA category renders as grey instead of transparent.
+acmg_palette <- c(
+  setNames(viridisLite::rocket(6, direction = -1, end = 0.85),
+           c("0", "1", "2", "3", "4", "5")),
+  "NA" = "grey70"
+)
+
+#  BND partner-chromosome validation for ST17 hits 
+# AnnotSV's user-BED overlap test only checks one breakpoint of a BND
+# record against the BED interval.
+#
+# Current ST17 BED `name` column format (post gene-annotation update):
+#   "chrA:posA-chrB:posB_(geneA::geneB)"                (single hit)
+#   "hit1|hit2|hit3|..."                                (multi-hit, '|'-sep)
+#
+
+# Strip a leading "chr" (any case) so "chr21", "Chr21", "21" all compare equal.
+normalize_chrom <- function(s) {
+  sub("^chr", "", as.character(s), ignore.case = TRUE)
+}
+
+# Strip InfoTuple wrapping `('val',)` -> `val`. Pass-through for already-clean strings.
+strip_infotuple <- function(s) {
+  s <- as.character(s)
+  s <- sub("^\\(['\"]", "", s)
+  s <- sub("['\"],?\\s*\\)$", "", s)
+  s
+}
+
+# Clean vembrane's TSV-encoded ClinVar_SV_CLNSIG cell into a semicolon-joined
+# list of unique significance labels. VEP's --custom for the ClinVar SV VCF emits per-overlap CLNSIG values wrapped in double quotes and joined with "&", e.g. `"Pathogenic"&"Pathogenic"&"Likely%20pathogenic"&"Benign"`. 
+clean_clinvar_clnsig <- function(x) {
+  if (is.na(x) || !nzchar(x)) return("")
+  s <- str_replace_all(as.character(x), '"', '')
+  parts <- str_split(s, "&")[[1]] |> str_trim()
+  parts <- parts[nzchar(parts)]
+  paste(unique(parts), collapse = "; ")
+}
+
+# Vectorized breakpoint formatter for the DT `breakpoint` column.
+#
+# Intra-chromosomal SVs / CNAs (DEL, DUP, INV, INS, CNV):
+#   "chr21:100000-110000"   (if END > POS)
+#   "chr21:100000"          (if END == POS or END missing)
+#
+# Interchromosomal BNDs (parses partner from ALT bracket notation, all
+# four VCF spec forms: t[p[ , [p[t , t]p] , ]p]t):
+#   "chr21:100000|chr5:300000"
+#
+# BND with unparseable ALT falls back to "chr21:100000".
+#
+# Fully vectorized via `str_match` on the ALT column (no rowwise). The
+# `chr` prefix is added when absent (raw CHROM in the merged VCF is bare
+# "21" while ALT partner uses "chr21" — normalize both sides for consistent
+# display).
+compute_breakpoint <- function(chrom, pos, end, alt, svtype) {
+  chrom  <- as.character(chrom)
+  pos    <- as.character(pos)
+  end    <- as.character(end)
+  alt    <- as.character(alt)
+  svtype <- as.character(svtype)
+
+  prefix_chr <- function(c) ifelse(is.na(c) | !nzchar(c) | startsWith(c, "chr"),
+                                   c, paste0("chr", c))
+
+  chrom <- prefix_chr(chrom)
+
+  # BND if SVTYPE says so OR if ALT has bracket notation
+  is_bnd <- (svtype == "BND") | grepl("[\\[\\]]", alt)
+
+  # Vectorized partner parse from bracket notation
+  m <- str_match(alt, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
+  p_chr <- prefix_chr(m[, 2])
+  p_pos <- m[, 3]
+  partner_ok <- !is.na(p_chr) & !is.na(p_pos)
+
+  # Intra-chromosomal display: "chr:pos-end" or "chr:pos" when end is
+  # missing / equals pos (typical for INS)
+  end_valid <- !is.na(end) & nzchar(end) & end != "." & end != pos
+  intra <- ifelse(end_valid,
+                  paste0(chrom, ":", pos, "-", end),
+                  paste0(chrom, ":", pos))
+
+  ifelse(
+    is_bnd & partner_ok,
+    paste0(chrom, ":", pos, "|", p_chr, ":", p_pos),
+    intra
+  )
+}
+
+# Round a comma-joined hVAF cell to 2 decimal places.
+# Input:  "0.800000011920929,0.0,0.0"  (HP1, HP2, unphased triple)
+# Output: "0.80,0.00,0.00"
+# Preserves the 3-value tuple shape; missing/empty inputs pass through.
+format_hvaf <- function(x, digits = 2L) {
+  if (is.na(x) || !nzchar(x)) return("")
+  parts <- str_split(as.character(x), ",")[[1]] |> str_trim()
+  parts <- vapply(parts, function(v) {
+    n <- suppressWarnings(as.numeric(v))
+    if (is.na(n)) v else formatC(n, format = "f", digits = digits)
+  }, character(1), USE.NAMES = FALSE)
+  paste(parts, collapse = ",")
+}
+
+# check if a bnd is intra or interchromosomal 
+chk_intra_bnd <- function(breakpoint){
+  be <- str_split_1(breakpoint, pattern = "\\|") |>  gsub(pattern = "(.+):[0-9]+", replacement = "\\1", x = _)
+  if(length(be) == 2){
+    intrachrom <- be[1] == be[2]
+  } else {
+    intrachrom <- TRUE
+  }
+  return(intrachrom)
+}
+
+# Summarize an AnnotSV P_*_source (P_gain_source / P_loss_source /
+# P_ins_source) cell into a compact "first-3 + count" per category form.
+#
+# Input format: the raw INFO field is Number=. String — one entry per
+# overlapping annotated interval, each entry pipe-separated hits with the
+# source prefix. vembrane's chr(44).join(InfoTuple) delivers the whole cell
+# as ONE string with commas between entries and pipes within entries, e.g.:
+#   "dbVar:nssv1|dbVar:nssv2|morbid:APP|morbid:BACH1,.,.,dbVar:nssv2|morbid:APP,."
+#
+# Output form (per cell):
+#   "dbVar[3/12]: nssv1|nssv2|nssv3; morbid[3/8]: APP|BACH1|JAM2;
+#    CLN[2]: 3779864|552391; HI3[1]: DYRK1A"
+# For dbVar and morbid we show first-3 hits + total (unique) count. For
+# CLN and HI3 we show first-3 hits + count too. Bare `nssv*` (no prefix)
+# is categorized as dbVar per AnnotSV convention. Empty / all-"." input
+# returns "".
+summarize_p_source <- function(x, top_n = 3L) {
+  if (is.na(x) || !nzchar(x)) return("")
+  # Explode across commas (Number=. entries) and pipes (per-hit)
+  parts <- str_split(as.character(x), "[,|]")[[1]] |> str_trim()
+  parts <- parts[nzchar(parts) & parts != "."]
+  if (length(parts) == 0) return("")
+  # Categorize
+  cat_of <- function(h) {
+    if (startsWith(h, "dbVar:") || startsWith(h, "nssv")) return("dbVar")
+    if (startsWith(h, "morbid:")) return("morbid")
+    if (startsWith(h, "CLN:"))    return("CLN")
+    if (startsWith(h, "HI3:"))    return("HI3")
+    if (startsWith(h, "TS3:"))    return("TS3")
+    "other"
+  }
+  # Strip prefix for display
+  strip_prefix <- function(h) sub("^[A-Za-z0-9]+:", "", h)
+
+  cats  <- vapply(parts, cat_of, character(1), USE.NAMES = FALSE)
+  bags  <- split(parts, cats)
+  order_shown <- c("dbVar", "morbid", "CLN", "HI3", "TS3", "other")
+  order_shown <- order_shown[order_shown %in% names(bags)]
+
+  fmt_one <- function(cat) {
+    uniq <- unique(bags[[cat]])
+    shown <- head(vapply(uniq, strip_prefix, character(1), USE.NAMES = FALSE), top_n)
+    sprintf("%s[%d/%d]: %s", cat, length(shown), length(uniq),
+            paste(shown, collapse = "|"))
+  }
+  paste(vapply(order_shown, fmt_one, character(1), USE.NAMES = FALSE),
+        collapse = "; ")
+}
+
+# Clean AnnotSV's `full,split,split,...` padding pattern. When an AnnotSV
+# TSV row is converted to VCF INFO, the full-mode value is at index 0 and
+# the split-mode entries follow at positions 1..N. Fields that vary per
+# split (Gene_name, Location, etc.) get real values; fields that only exist
+# in full mode get "." for every split → strings like "value,.,.,.,.".
+# Split on ",", drop "." and empty tokens, rejoin with ",". Idempotent —
+# a cell that never had padding (already clean) round-trips unchanged.
+clean_annot_padding <- function(x) {
+  if (is.na(x) || !nzchar(x)) return("")
+  parts <- str_split(as.character(x), ",")[[1]] |> str_trim()
+  parts <- parts[nzchar(parts) & parts != "."]
+  paste(parts, collapse = ",")
+}
+
+# Split on both `,` and `|`, drop empties / ".", return unique tokens in
+# first-seen order joined with a single delimiter. Used for AnnotSV fields
+# where full-mode emits a `|`-joined multi-value list and split-mode repeats
+# the same values comma-appended (Gene_name, CytoBand, Location).
+dedup_annot_multi <- function(x, sep = "; ") {
+  if (is.na(x) || !nzchar(x)) return("")
+  parts <- str_split(as.character(x), "[,|]\\s*")[[1]] |> str_trim()
+  parts <- parts[nzchar(parts) & parts != "."]
+  if (length(parts) == 0) return("")
+  paste(unique(parts), collapse = sep)
+}
+
+# Collapse a multi-cytoband CytoBand string to its encompassing range.
+# For large CNAs / SVs, AnnotSV emits both a "full" annotation with the
+# encompassing range (e.g. `q23.31-q26.3`) and per-split-mode annotations
+# for every sub-band inside (`q23.31`, `q23.32`, `q23.32-q23.33`, …). After
+# `dedup_annot_multi()` runs, the CytoBand cell looks like:
+#     q23.31-q26.3; q23.31; q23.32; q23.32-q23.33; q23.33; q24.1; ...
+# which is technically deduplicated (every distinct sub-range is unique)
+# but useless in the DT display. Collapse to a single `<min>-<max>` range
+# by parsing every position token (splitting ranges at `-`), sorting by
+# (arm, major, sub) ascending, and rebuilding the outermost interval.
+#
+# Input examples → outputs:
+#   "q23.31"                                    → "q23.31"
+#   "q23.31; q23.32"                            → "q23.31-q23.32"
+#   "q23.31-q26.3; q23.31; ...; q26.3"          → "q23.31-q26.3"
+#   "p13.2; p13.1"                              → "p13.1-p13.2"   (p arm order)
+#   ""  / "." / NA                              → ""
+#
+# p-arm bands are sorted with the LARGER major number distal (further from
+# centromere) — i.e. p13 comes before p11 when reading toward the centromere.
+# For range endpoints we still take alphanumeric min-max of the numeric part
+# on each arm; the display convention is "smaller number - larger number"
+# per arm, matching how AnnotSV writes its own full-mode ranges.
+collapse_cytoband_range <- function(cytoband_str) {
+  if (is.na(cytoband_str) || !nzchar(cytoband_str) || cytoband_str == ".") return("")
+  parts <- str_split(as.character(cytoband_str), "[;,|]\\s*")[[1]] |> str_trim()
+  parts <- parts[nzchar(parts) & parts != "."]
+  if (length(parts) == 0) return("")
+
+  # Break any pre-existing ranges (e.g. "q23.31-q26.3") into their two
+  # endpoint tokens so we sort on a flat vector of atomic positions.
+  positions <- unlist(lapply(parts, function(p) {
+    if (grepl("-", p, fixed = TRUE)) str_split(p, "-")[[1]] else p
+  }))
+  positions <- unique(positions[nzchar(positions)])
+  if (length(positions) == 0) return("")
+  if (length(positions) == 1) return(positions[1])
+
+  # Sort into chromosomal (linear) order — p-telomere → centromere → q-telomere.
+  # On the p arm, HIGHER band numbers are DISTAL (closer to telomere, i.e. lower
+  # linear position): p13.3 < p13.2 < p13.1 in chromosomal position; AnnotSV
+  # writes p-arm ranges telomere-to-centromere → descending numeric.
+  # On the q arm, HIGHER band numbers are DISTAL (further from centromere, i.e.
+  # higher linear position): q11.1 < q11.2 < q13.3 in chromosomal position;
+  # AnnotSV writes q-arm ranges centromere-to-telomere → ascending numeric.
+  # Sub-band digit strings compare LEXICOGRAPHICALLY (not numerically) since
+  # they're nested labels: q26.1 contains q26.11 / q26.12 / q26.13, and q26.2
+  # comes AFTER q26.13. Lex "13" < "3" because '1' < '3' — correct order.
+  parse_key <- function(p) {
+    m <- regmatches(p, regexec("^([pq])(\\d+)(?:\\.(\\d+))?$", p))[[1]]
+    if (length(m) < 3 || !nzchar(m[2])) return(list(arm=3L, major=999L, sub="~"))
+    arm_rank <- if (m[2] == "p") 1L else 2L
+    major <- suppressWarnings(as.integer(m[3])) %||% 999L
+    sub   <- if (length(m) >= 4 && nzchar(m[4])) m[4] else ""
+    list(arm = arm_rank, major = major, sub = sub)
+  }
+  keys <- lapply(positions, parse_key)
+  arms   <- vapply(keys, `[[`, integer(1),   "arm")
+  majors <- vapply(keys, `[[`, integer(1),   "major")
+  subs   <- vapply(keys, `[[`, character(1), "sub")
+
+  # Sort each arm independently, then concat p-then-q to get chromosomal order.
+  #   p arm: sort ascending (major, sub) then REVERSE — high band numbers first
+  #          (most telomeric on p side)
+  #   q arm: sort ascending (major, sub) directly
+  is_p <- arms == 1L
+  is_q <- arms == 2L
+  is_x <- arms == 3L  # unrecognized tokens sink to the end
+  p_ord <- rev(order(majors[is_p], subs[is_p]))
+  q_ord <- order(majors[is_q], subs[is_q])
+  x_ord <- order(subs[is_x])
+  sorted <- c(positions[is_p][p_ord],
+              positions[is_q][q_ord],
+              positions[is_x][x_ord])
+  min_p <- sorted[1]
+  max_p <- sorted[length(sorted)]
+  if (min_p == max_p) return(min_p)
+  paste0(min_p, "-", max_p)
+}
+
+# Parse a CIViC INFO annotation cell into a fixed set of interpretive columns.
+# The CIViC VCF annotation loaded via `bcftools annotate` uses a VEP-style
+# 40-field pipe-delimited entry; a record with N CIViC assertions carries N
+# such entries joined by ",". This helper extracts the seven columns
+# requested for downstream clinical review, deduplicates across per-record
+# entries (multi-therapy / multi-evidence records collapse cleanly), and
+# returns a named list of atomic character scalars suitable for
+# `dplyr::mutate(...)` splatting. Field indices are fixed by the CIViC
+# header (see the CIVIC INFO Description in the annotate_civic_snv VCF):
+#   0 Allele        1 Consequence   2 SYMBOL          9 CIViC Variant ID
+#  11 CIViC Variant URL             24 CIViC Entity Variant Origin
+#  29 CIViC Entity Therapies        34 CIViC Assertion ACMG Codes
+parse_civic_field <- function(civic_str) {
+  empty <- list(
+    CIViC_Consequence           = NA_character_,
+    CIViC_SYMBOL                = NA_character_,
+    CIViC_Variant_ID            = NA_character_,
+    CIViC_Variant_URL           = NA_character_,
+    CIViC_Entity_Variant_Origin = NA_character_,
+    CIViC_Entity_Therapies      = NA_character_,
+    CIViC_Assertion_ACMG_Codes  = NA_character_
+  )
+  s <- as.character(civic_str)
+  if (is.na(s) || !nzchar(s) || s %in% c("NA", ".")) return(empty)
+
+  hits <- str_split(s, ",")[[1]]
+  fields_list <- lapply(hits, function(h) {
+    v <- str_split(h, "\\|")[[1]]
+    length(v) <- 40L
+    v
+  })
+
+  # 0-indexed in the CIViC header; +1 for R.
+  extract_col <- function(idx0) {
+    vals <- vapply(fields_list, function(v) {
+      x <- v[idx0 + 1L]
+      if (is.na(x) || !nzchar(x)) NA_character_ else x
+    }, character(1))
+    vals <- unique(vals[!is.na(vals)])
+    if (length(vals) == 0) NA_character_ else paste(vals, collapse = ";")
+  }
+
+  list(
+    CIViC_Consequence           = extract_col(1L),
+    CIViC_SYMBOL                = extract_col(2L),
+    CIViC_Variant_ID            = extract_col(9L),
+    CIViC_Variant_URL           = extract_col(11L),
+    CIViC_Entity_Variant_Origin = extract_col(24L),
+    CIViC_Entity_Therapies      = extract_col(29L),
+    CIViC_Assertion_ACMG_Codes  = extract_col(34L)
+  )
+}
+
+
+# Vectorized full clean of vembrane InfoTuple representations across a column.
+clean_tuple <- function(x) {
+  s <- as.character(x)
+  out <- s
+  hit <- !is.na(s) & grepl("^\\(.*\\)$", s)
+  if (any(hit)) {
+    out[hit] <- vapply(s[hit], function(t) {
+      # Strip outer parens (and trailing comma for single-element tuples)
+      inner <- sub("^\\(", "", sub(",?\\s*\\)$", "", t))
+      # Capture all single- or double-quoted elements
+      m <- str_match_all(inner, "'([^']*)'|\"([^\"]*)\"")[[1]]
+      if (nrow(m) == 0) return(inner)
+      vals <- ifelse(is.na(m[, 2]), m[, 3], m[, 2])
+      paste(vals, collapse = "; ")
+    }, character(1), USE.NAMES = FALSE)
+  }
+  out
+}
+
+# Load a one-gene-per-line file into a character vector for Candidate_genes
+# Returns an empty vector if the params$candidate_genes path is missing or empty.
+load_candidate_gene_set <- function() {
+  fp <- params$candidate_genes
+  if (is.null(fp) || !nzchar(fp) || !file.exists(fp)) return(character(0))
+  lines <- readLines(fp, warn = FALSE)
+  trimmed <- str_trim(lines)
+  trimmed[nzchar(trimmed) & !startsWith(trimmed, "#")]
+}
+
+# Union candidate-gene detection across Gene_name (SV interval overlap) +
+# Closest_left / Closest_right (nearest flanking gene). Intergenic BND
+# breakpoints have empty Gene_name but often carry a driver gene as the
+# closest-flanking annotation — critical for T-ALL where BND-mediated fusion
+# partners land in intergenic regions. Returns a "; "-joined string of unique
+# candidate-gene hits across the three columns, in first-seen order.
+compute_candidate_genes <- function(gene_name, closest_left, closest_right,
+                                    candidate_set) {
+  if (length(candidate_set) == 0) return("")
+  raw <- c(gene_name, closest_left, closest_right)
+  raw <- raw[!is.na(raw) & nzchar(raw)]
+  if (length(raw) == 0) return("")
+  parts <- unlist(lapply(raw, function(s) str_trim(str_split(s, "[|;]\\s*")[[1]])))
+  hits  <- unique(parts[parts %in% candidate_set])
+  paste(hits, collapse = "; ")
+}
+
+# Summarize a Gene_name list for display: if the underlying gene count
+# exceeds `cap`, truncate to the first `cap` genes and append " (n=<count>
+# genes)"; otherwise return the raw joined string unchanged. `count` should
+# be the AnnotSV Gene_count column value (authoritative — includes genes
+# that may have been de-duplicated in the display string). Falls back to
+# counting the delimiter-split length when count is NA / empty.
+summarize_gene_list <- function(gene_str, count = NA_integer_, cap = 20L) {
+  if (is.na(gene_str) || !nzchar(gene_str)) return("")
+  genes <- str_split(gene_str, "[|;]\\s*")[[1]] |> str_trim()
+  genes <- genes[nzchar(genes)]
+  n_parsed <- length(genes)
+  n_auth <- suppressWarnings(as.integer(count))
+  n_show <- if (!is.na(n_auth) && n_auth > 0) n_auth else n_parsed
+  if (n_show > cap) {
+    paste0(paste(head(genes, cap), collapse = "; "),
+           "; ... (n=", n_show, " genes)")
+  } else {
+    paste(genes, collapse = "; ")
+  }
+}
+
+# Parse an ST17 score cell (semicolon- or comma-joined multi-hit) and return
+# the maximum integer score. Falls back to 0 for empty / non-numeric input.
+# Used as the tier-1 tie-breaker in driver_tier ranking (recurrence-count
+# proxy: highest ST17 score = most recurrent T-ALL SV).
+parse_st17_max_score <- function(score_str) {
+  if (is.na(score_str) || !nzchar(score_str)) return(0L)
+  toks <- str_split(score_str, "[,;|]\\s*")[[1]] |> str_trim()
+  vals <- suppressWarnings(as.integer(toks))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) 0L else max(vals)
+}
+
+# Pair-split an ST17 (name, score) cell together so downstream ordering is
+# stable and interpretable. AnnotSV emits multi-hit ST17 cells with two
+# different join-levels: the name field can hold multiple gene-pair
+# alternatives inside a single BED row's `_(GENE_A|_GENE_B::GENE_C|_GENE_D)`
+# construct AND multiple BED rows joined by `|`; the score field carries one
+# score per BED row joined by `|`. That mismatch is why a length-5 name and
+# length-2 score can appear in the same record. This function:
+#   1. Splits name via `split_pipe_outside_parens` (respects `_(...|...)`).
+#   2. Splits score by `|` at outer level.
+#   3. Drops empty/"." tokens (residual `clean_annot_padding` artefacts).
+#   4. Pairs by index — if scores shorter than names (AnnotSV pipe-mismatch),
+#      the LAST score is repeated to fill (a per-BED-row score naturally
+#      applies to every gene-pair variant inside that BED row's name field).
+#   5. De-duplicates by name (keeps highest-score occurrence).
+#   6. Orders by score desc (NA last) and truncates to `top_n` hits.
+# Returns a named list of two `|`-joined strings so downstream code can
+# either display them jointly (`ST17_hit`) or feed the score string into
+# `parse_st17_max_score` for tier tie-breaking.
+parse_st17_pair <- function(name_str, score_str, top_n = 3L) {
+  empty_result <- list(names = "", scores = "")
+  if (is.na(name_str) || !nzchar(name_str) || name_str == ".") return(empty_result)
+
+  names_v <- split_pipe_outside_parens(as.character(name_str))
+  names_v <- names_v[nzchar(names_v) & names_v != "."]
+  if (length(names_v) == 0) return(empty_result)
+
+  scores_num <- if (is.na(score_str) || !nzchar(score_str) || score_str == ".") {
+    integer(0)
+  } else {
+    toks <- str_split(as.character(score_str), "\\|")[[1]] |> str_trim()
+    toks <- toks[nzchar(toks) & toks != "."]
+    suppressWarnings(as.integer(toks))
+  }
+  scores_num <- scores_num[!is.na(scores_num)]
+
+  n_names  <- length(names_v)
+  n_scores <- length(scores_num)
+  if (n_scores == 0) {
+    paired <- rep(NA_integer_, n_names)
+  } else if (n_scores >= n_names) {
+    paired <- scores_num[seq_len(n_names)]
+  } else {
+    paired <- c(scores_num, rep(scores_num[n_scores], n_names - n_scores))
+  }
+
+  ord <- order(paired, decreasing = TRUE, na.last = TRUE)
+  names_v <- names_v[ord]
+  paired  <- paired[ord]
+
+  keep <- !duplicated(names_v)
+  names_v <- names_v[keep]
+  paired  <- paired[keep]
+
+  n_take <- min(as.integer(top_n), length(names_v))
+  list(
+    names  = paste(names_v[seq_len(n_take)], collapse = "|"),
+    scores = paste(ifelse(is.na(paired[seq_len(n_take)]), "",
+                          as.character(paired[seq_len(n_take)])),
+                   collapse = "|")
+  )
+}
+
+# Assign a T-ALL driver-priority tier per pass2 record:
+#   Tier 1 = any SVTYPE-matched name_ST17_* hit (empirical T-ALL recurrence)
+#   Tier 2 = no ST17 hit, but ≥1 Candidate_genes match (literature prior)
+#   Tier 3 = neither (still passed pass2 by other evidence — P_gain_source,
+#                     RE_gene, ACMG 3-5, or ClinVar pathogenic)
+# Tie-breaker `tier_score` (higher = better):
+#   T1: max integer score across SVTYPE-matched score_ST17_* — proxies
+#       T-ALL cohort recurrence
+#   T2: number of overlapping candidate genes — more hits = broader impact
+#   T3: AnnotSV_ranking_score — falls back to AnnotSV's own ranking
+# Returns a tibble with columns `driver_tier` (integer 1-3) and
+# `tier_score` (numeric).
+assign_driver_tier <- function(st17_name, st17_score, candidate_genes,
+                                annotsv_ranking_score) {
+  has_st17 <- !is.na(st17_name) & nzchar(st17_name)
+  has_cand <- !is.na(candidate_genes) & nzchar(candidate_genes)
+  tier <- ifelse(has_st17, 1L,
+                 ifelse(has_cand, 2L, 3L))
+  cand_n <- vapply(candidate_genes, function(s) {
+    if (is.na(s) || !nzchar(s)) return(0L)
+    length(str_split(s, ";\\s*")[[1]])
+  }, integer(1), USE.NAMES = FALSE)
+  st17_max <- vapply(st17_score, parse_st17_max_score,
+                     integer(1), USE.NAMES = FALSE)
+  ann_num <- suppressWarnings(as.numeric(annotsv_ranking_score))
+  ann_num[is.na(ann_num)] <- 0
+  score <- ifelse(tier == 1L, as.numeric(st17_max),
+                  ifelse(tier == 2L, as.numeric(cand_n), ann_num))
+  tibble::tibble(driver_tier = tier, tier_score = score)
+}
+
+# CNA driver-priority tier 
+# BED CNV 
+#   Tier 1 = any SVTYPE-matched name_ST19_* hit 
+#            match GAIN records -> AMP+GAIN cols, LOSS records -> DEL+LOSS)
+#   Tier 2 = no ST19 hit, but ≥1 Candidate_genes match
+#   Tier 3 = neither (P_gain_source, ACMG 3-5, etc.)
+# Tie-breaker `tier_score`:
+#   T1: max score across the 4 score_ST19_* columns
+#   T2: number of overlapping candidate genes
+#   T3: AnnotSV_ranking_score
+assign_driver_tier_cna <- function(st19_amp_name, st19_del_name,
+                                    st19_gain_name, st19_loss_name,
+                                    st19_amp_score, st19_del_score,
+                                    st19_gain_score, st19_loss_score,
+                                    candidate_genes, annotsv_ranking_score) {
+  st19_names <- list(st19_amp_name, st19_del_name, st19_gain_name, st19_loss_name)
+  st19_scores <- list(st19_amp_score, st19_del_score, st19_gain_score, st19_loss_score)
+
+  has_st19 <- Reduce(`|`, lapply(st19_names, function(v) !is.na(v) & nzchar(v)))
+  has_cand <- !is.na(candidate_genes) & nzchar(candidate_genes)
+  tier <- ifelse(has_st19, 1L,
+                 ifelse(has_cand, 2L, 3L))
+
+  cand_n <- vapply(candidate_genes, function(s) {
+    if (is.na(s) || !nzchar(s)) return(0L)
+    length(str_split(s, ";\\s*")[[1]])
+  }, integer(1), USE.NAMES = FALSE)
+
+  st19_max <- pmax(
+    vapply(st19_amp_score,  parse_st17_max_score, integer(1), USE.NAMES = FALSE),
+    vapply(st19_del_score,  parse_st17_max_score, integer(1), USE.NAMES = FALSE),
+    vapply(st19_gain_score, parse_st17_max_score, integer(1), USE.NAMES = FALSE),
+    vapply(st19_loss_score, parse_st17_max_score, integer(1), USE.NAMES = FALSE),
+    na.rm = TRUE
+  )
+  ann_num <- suppressWarnings(as.numeric(annotsv_ranking_score))
+  ann_num[is.na(ann_num)] <- 0
+  score <- ifelse(tier == 1L, as.numeric(st19_max),
+                  ifelse(tier == 2L, as.numeric(cand_n), ann_num))
+  tibble::tibble(driver_tier = tier, tier_score = score)
+}
+
+# SNV driver-priority tier 
+# candidate-gene evidence.
+#   Tier 1 = ONC = "Oncogenic" OR "Likely_oncogenic" AND SYMBOL in candidate panel
+#   Tier 2 = ClinVar pathogenic/likely_pathogenic OR candidate-gene member
+#   Tier 3 = neither ( SIFT deleterious / PolyPhen damaging predictions) 
+# Tie-breaker `tier_score` = max(CLAIRSTO_VAF, DEEPSOMATIC_VAF) — somatic. ties broken by higher confidence in the somatic call.
+assign_driver_tier_snv <- function(onc, clnsig, candidate_genes,
+                                    clairsto_vaf, deepsomatic_vaf) {
+  onc_str    <- as.character(onc)
+  clnsig_str <- as.character(clnsig)
+  cand_str   <- as.character(candidate_genes)
+
+  # ONC substring: "Oncogenic" and "Likely_oncogenic"
+  # ClinVar substring: "Pathogenic", "Likely_pathogenic", "Pathogenic_low_penetrance"
+  has_onc  <- !is.na(onc_str) &
+              grepl("ncogenic", onc_str, ignore.case = TRUE)
+  has_cln  <- !is.na(clnsig_str) &
+              grepl("athogenic", clnsig_str, ignore.case = TRUE)
+  has_cand <- !is.na(cand_str) & nzchar(cand_str)
+
+  tier <- ifelse(has_onc & has_cand, 1L,
+                 ifelse(has_cln | has_cand, 2L, 3L))
+
+  vaf <- pmax(
+    suppressWarnings(as.numeric(clairsto_vaf)),
+    suppressWarnings(as.numeric(deepsomatic_vaf)),
+    na.rm = TRUE
+  )
+  vaf[is.na(vaf) | is.infinite(vaf)] <- 0
+  tibble::tibble(driver_tier = tier, tier_score = vaf)
+}
+
+# Split on '|' but only at paren depth 0 — the ST17 hit format embeds gene
+# annotations like `_(RUNX1|_TLX3::TLX3|_RUNX1)` where the inner '|' is
+# part of one hit, not a hit-separator. `str_split` doesn't natively
+# respect bracket nesting; this manual scanner does.
+split_pipe_outside_parens <- function(s) {
+  if (length(s) == 0 || is.na(s) || s == "") return(character(0))
+  chars <- strsplit(s, "", fixed = TRUE)[[1]]
+  depth <- 0L
+  parts <- character(0)
+  current <- ""
+  for (ch in chars) {
+    if (ch == "(") { depth <- depth + 1L; current <- paste0(current, ch) }
+    else if (ch == ")") { depth <- max(depth - 1L, 0L); current <- paste0(current, ch) }
+    else if (ch == "|" && depth == 0L) {
+      parts <- c(parts, current); current <- ""
+    } else {
+      current <- paste0(current, ch)
+    }
+  }
+  c(parts, current)
+}
+
+# Parse the partner-side breakpoint from a Severus/SAVANA BND ALT.
+# Handles all four VCF spec bracket forms: t[p[ , [p[t , t]p] , ]p]t.
+parse_bnd_partner <- function(alt) {
+  if (is.na(alt) || alt == "") return(list(chrom = NA_character_, pos = NA_real_))
+  m <- str_match(alt, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
+  if (is.na(m[1, 2])) return(list(chrom = NA_character_, pos = NA_real_))
+  list(chrom = normalize_chrom(m[1, 2]), pos = as.numeric(m[1, 3]))
+}
+
+# Test whether a sample's two breakpoints overlap a reference pair within
+# `tol` bp, trying both pair orderings (BND pairs are unordered).
+bnd_pair_matches <- function(s_chrom_a, s_pos_a, s_chrom_b, s_pos_b,
+                              r_chrom_a, r_pos_a, r_chrom_b, r_pos_b,
+                              tol = 10000) {
+  s_a <- normalize_chrom(s_chrom_a); s_b <- normalize_chrom(s_chrom_b)
+  r_a <- normalize_chrom(r_chrom_a); r_b <- normalize_chrom(r_chrom_b)
+  direct  <- (s_a == r_a && abs(s_pos_a - r_pos_a) <= tol &&
+              s_b == r_b && abs(s_pos_b - r_pos_b) <= tol)
+  swapped <- (s_a == r_b && abs(s_pos_a - r_pos_b) <= tol &&
+              s_b == r_a && abs(s_pos_b - r_pos_a) <= tol)
+  isTRUE(direct || swapped)
+}
+
+# Apply the partner filter to one sample BND row. Returns the filtered
+# `name_ST17_BND` string (sub-elements separated by '|' that don't
+# partner-match the sample dropped). `score_ST17_BND` is passed through
+# unchanged: AnnotSV's score join uses '|' at a different level than its
+# name-join (one BED row's `name` field can itself contain '|' between
+# gene-pair variants), so a 1:1 name↔score index alignment isn't safe.
+# If the partner cannot be parsed from ALT, clear the name (conservative
+# — a loose-end breakend can't be validated).
+filter_bnd_st17_name <- function(sample_chrom, sample_pos, sample_alt,
+                                  ref_names, tol = 10000) {
+  cleaned <- strip_infotuple(ref_names)
+  if (is.na(cleaned) || cleaned %in% c("", "NA", ".")) return("")
+
+  partner <- parse_bnd_partner(sample_alt)
+  if (is.na(partner$chrom)) return("")
+
+  hits <- split_pipe_outside_parens(cleaned)
+
+  # Per-hit format: chrA:posA-chrB:posB_(genes...)
+  # Match the two coord pairs separated by '-'; anything after '_' is
+  # gene-annotation suffix and ignored for partner validation.
+  keep <- map_lgl(hits, function(hit) {
+    m <- str_match(hit, "([^:|]+):([0-9]+)-([^:|]+):([0-9]+)")
+    if (is.na(m[1, 2])) return(FALSE)
+    bnd_pair_matches(
+      sample_chrom, as.numeric(sample_pos), partner$chrom, partner$pos,
+      m[1, 2], as.numeric(m[1, 3]),
+      m[1, 4], as.numeric(m[1, 5]),
+      tol = tol
+    )
+  })
+
+  paste(hits[keep], collapse = "|")
+}
+```
+
+```{r annotsv-user-cols-regex}
+#  Derive the user-annotation column regex from AnnotSV header files 
+# ANNOTSV_SETUPUSERANNO stages `<STn>_<basename>.header.tsv` files under
+# annotsv_annotations/Annotations_Human/Users/<genome>/{FtIncludedInSV,
+# SVincludedInFt,AnyOverlap}/. vembrane emits the corresponding INFO fields
+# as `name_<STn>_<basename>` and `score_<STn>_<basename>` in the pipeline
+# TSVs, so the "Custom Annot. Hits" tally in parse_annotsv() must only
+# count columns backed by actual staged headers, not any incidental `_ST`
+# prefix. `build_user_cols_regex()` reads those filenames at render time
+# and builds the exact alternation regex; when the annotsv_annotations
+# input isn't staged (e.g. dev-time render outside the pipeline), fall
+# back to the structural `^(name|score)_ST\d+_` prefix pattern which still
+# beats the pre-refactor `FtIncludedInSV|SVincludedInFt|AnyOverlap` regex.
+build_user_cols_regex <- function() {
+  users_root <- file.path("annotsv_annotations", "Annotations_Human", "Users")
+  if (!dir.exists(users_root)) return("^(name|score)_ST\\d+_")
+  hdr_files <- list.files(
+    path       = users_root,
+    pattern    = "\\.header\\.tsv$",
+    recursive  = TRUE,
+    full.names = FALSE
+  )
+  if (length(hdr_files) == 0) return("^(name|score)_ST\\d+_")
+  basenames <- unique(sub("\\.header\\.tsv$", "", basename(hdr_files)))
+  # Regex-escape literal chars (dot, paren, plus, etc.) so `.` in a
+  # basename like `Alterations.CNV.Recurrent_AMP` matches a literal dot.
+  escaped <- gsub("([][{}()*+?.\\\\^$|])", "\\\\\\1", basenames)
+  sprintf("^(name|score)_(%s)$", paste(escaped, collapse = "|"))
+}
+
+user_cols_regex <- build_user_cols_regex()
+```
+
+```{r dt-readability, results='asis'}
+# Cyborg theme renders the page in dark mode (black body, light grey text).
+# DT tables inherit that styling and become unreadable (black on dark grey).
+# Force the table cell area to white with dark text while keeping the
+# surrounding chrome (filter / info / pagination / column-search) light so
+# it stays readable against the dark page background.
+cat('
+<style>
+  /*  Layout: width is handled per-DT-chunk via `#| column: screen-inset`
+     (Quarto chunk option). This widens those specific chunks beyond the
+     centered article body without overriding Bootstrap container widths
+     elsewhere (which is fragile). Inside each chunk, force the DT widget
+     and the table itself to fill 100% of the screen-inset region.  */
+  .column-screen-inset .dataTables_wrapper,
+  .column-screen-inset .datatables,
+  .column-screen-inset .html-widget,
+  .column-screen-inset table.dataTable { width: 100% !important; }
+
+  /*  Typography: smaller section headers  */
+  h1, .h1 { font-size: 1.6rem !important; }
+  h2, .h2 { font-size: 1.3rem !important; margin-top: 1.2rem; }
+  h3, .h3 { font-size: 1.1rem !important; margin-top: 1.0rem; }
+  h4, .h4 { font-size: 1.0rem !important; }
+
+  /*  Typography: smaller text inside DT tables  */
+  table.dataTable, table.dataTable thead th, table.dataTable tbody td,
+  .dataTables_wrapper, .dataTables_filter, .dataTables_length,
+  .dataTables_info, .dataTables_paginate, .dt-buttons .dt-button {
+    font-size: 0.80rem !important;
+  }
+  table.dataTable thead th, table.dataTable tbody td { padding: 4px 6px !important; }
+
+  /*  Cell wrapping: allow long gene lists / coordinate strings to wrap
+     instead of bulldozing horizontal layout. max-width caps cell width
+     while word-break lets multi-element values break at any character.  */
+  table.dataTable tbody td {
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    max-width: 320px;
+    vertical-align: top !important;
+  }
+  table.dataTable thead th {
+    white-space: normal !important;
+    vertical-align: bottom !important;
+  }
+
+  /*  Column grid lines: a 1 px right border on every td/th keeps headers
+     visually aligned over their column values when the table wraps long
+     strings into multi-line cells. Last column drops the right border so
+     the table edge stays clean. Header row gets a heavier bottom border
+     so the head/body boundary remains clear under the cyborg dark theme.  */
+  table.dataTable td, table.dataTable th {
+    border-right: 1px solid #ced4da !important;
+  }
+  table.dataTable td:last-child, table.dataTable th:last-child {
+    border-right: none !important;
+  }
+  table.dataTable thead th {
+    border-bottom: 2px solid #495057 !important;
+  }
+
+  /*  Theme: cell backgrounds (light) on the dark cyborg body  */
+  table.dataTable { background-color: #ffffff !important; color: #212529 !important; }
+  table.dataTable thead th,
+  table.dataTable thead td { background-color: #e9ecef !important; color: #212529 !important;
+                             border-bottom: 2px solid #adb5bd !important; }
+  table.dataTable tbody tr td { background-color: #ffffff !important; color: #212529 !important; }
+  table.dataTable tbody tr.odd td,
+  table.dataTable.stripe tbody tr.odd > td,
+  table.dataTable.display tbody tr.odd > td { background-color: #f1f3f5 !important; }
+  table.dataTable tbody tr:hover td { background-color: #dee2e6 !important; }
+  /* Per-column search row inside thead */
+  table.dataTable thead input,
+  table.dataTable thead select { background-color: #ffffff !important; color: #212529 !important;
+                                 border: 1px solid #ced4da !important; }
+
+  /* Wrapper chrome — keep light text against the dark page */
+  .dataTables_wrapper { color: #f8f9fa !important; padding: 4px 0; }
+  .dataTables_filter label,
+  .dataTables_length label,
+  .dataTables_info { color: #f8f9fa !important; }
+  .dataTables_filter input,
+  .dataTables_length select { background-color: #ffffff !important; color: #212529 !important;
+                              border: 1px solid #ced4da !important; }
+  .dataTables_paginate .paginate_button { color: #f8f9fa !important; }
+  .dataTables_paginate .paginate_button.current,
+  .dataTables_paginate .paginate_button:hover { background: #495057 !important;
+                                                color: #ffffff !important; border-color: #6c757d !important; }
+  /* CSV / Excel export buttons */
+  .dt-buttons .dt-button { background-color: #495057 !important; color: #ffffff !important;
+                          border: 1px solid #6c757d !important; }
+</style>
+')
+```
+
+```{r parse-annotsv}
+annotsv_tsvs <- list.files(pattern = "\\.merged\\.annotated.*\\.tsv$",
+                           full.names = TRUE)
+# Exclude pass1/pass2 TSVs (also match the .tsv$ pattern but belong to
+# the vembrane-table chunk below).
+annotsv_tsvs <- setdiff(annotsv_tsvs,
+                        list.files(pattern = "\\.filtered\\.pass[12]\\.tsv$",
+                                   full.names = TRUE))
+
+parse_annotsv <- function(tsv_path) {
+  df   <- read_tsv(tsv_path, col_types = cols(.default = "c"), show_col_types = FALSE)
+  full <- filter(df, Annotation_mode == "full")
+  sample_id <- sub("\\.merged\\..+$", "", basename(tsv_path))
+  acmg <- suppressWarnings(as.integer(full$ACMG_class))
+  # `user_cols_regex` is built from the staged AnnotSV Users/ header files
+  # (see annotsv-user-cols-regex chunk) so only actual user-annotation
+  # columns count toward `Custom Annot. Hits`.
+  user_cols <- grep(user_cols_regex, colnames(full), value = TRUE)
+  custom_hits <- if (length(user_cols) > 0) {
+    rowSums(!is.na(full[user_cols]) & full[user_cols] != "", na.rm = TRUE) > 0
+  } else {
+    rep(FALSE, nrow(full))
+  }
+  tibble(
+    `Sample ID`             = sample_id,
+    `Total SVs`             = nrow(full),
+    `ACMG >= VUS (>=3)`     = sum(acmg >= 3, na.rm = TRUE),
+    `Likely Pathogenic (4)` = sum(acmg == 4, na.rm = TRUE),
+    `Pathogenic (5)`        = sum(acmg == 5, na.rm = TRUE),
+    `Custom Annot. Hits`    = sum(custom_hits)
+  )
+}
+
+stats_df <- map_dfr(annotsv_tsvs, parse_annotsv)
+```
+
+```{r merge-metadata}
+# Join key is `id` (the pipeline meta.id, e.g. "colo829"), not `sample_id`
+# (which is a friendly label like "sample_1" in the metadata CSV). `Sample ID`
+# in stats_df is derived from the AnnotSV TSV filename and therefore matches
+# `id` exactly. Strip leading/trailing whitespace from metadata column names —
+# the test fixture has " mutations" (with a leading space) due to a CSV
+# whitespace artifact.
+metadata_file <- params$meta_data
+if (!is.null(metadata_file) && nzchar(metadata_file) && file.exists(metadata_file)) {
+  metadata <- read_csv(metadata_file, col_types = cols(.default = "c"),
+                       show_col_types = FALSE)
+  colnames(metadata) <- str_trim(colnames(metadata))
+  stats_df <- left_join(stats_df, metadata, by = c("Sample ID" = "id"))
+} else {
+  metadata <- NULL
+}
+
+# Helper: attach sample_metadata rows to a variant table (SV / CNA / SNV) by
+# joining on the pipeline id (`SAMPLE` in the variant df, `id` in the
+# metadata CSV). Called twice per variant table:
+#   * `cols = NULL` — full metadata merge, used before `write_tsv` so the
+#     cohort TSVs carry every metadata column.
+#   * `cols = "sample_id"` — DT-only merge to add the friendly sample_id
+#     label without cluttering the interactive table with all cohort fields.
+# Returns df unchanged when no metadata is available so downstream code is
+# always safe to call.
+merge_sample_metadata <- function(df, meta = metadata, sample_col = "SAMPLE",
+                                   cols = NULL) {
+  if (is.null(meta) || nrow(meta) == 0 || !sample_col %in% names(df)) return(df)
+  m <- if (is.null(cols)) meta
+       else dplyr::select(meta, id, dplyr::any_of(cols))
+  m <- m |> dplyr::distinct(id, .keep_all = TRUE)
+  df |> dplyr::left_join(m, by = setNames("id", sample_col))
+}
+```
+
+```{r link-columns}
+knot_files <- list.files("knot", pattern = "\\.html$", full.names = FALSE)
+xl_files   <- list.files("knot", pattern = "\\.xlsm$", full.names = FALSE)
+vep_files  <- list.files("vep",  pattern = "\\.html$", full.names = FALSE)
+igv_files  <- list.files("igv",  pattern = "\\.html$", full.names = FALSE)
+
+# Bucketed IGV reports: IGV_REPORTS_SV emits one HTML per (sample × bucket)
+# where bucket is {small, medium, large} is encoded in the filename.
+# full `<sample>.pass2.igv.<bucket>` prefix so each bucket gets its own link.
+make_link <- function(sample_id, files, subdir, label = "open &#x2197;",
+                       suffix = NULL) {
+  pat <- if (is.null(suffix)) {
+    paste0("^", sample_id, "\\.")
+  } else {
+    paste0("^", sample_id, "\\.", suffix)
+  }
+  fname <- grep(pat, files, value = TRUE)
+  if (length(fname) >= 1)
+    sprintf('<a href="%s/%s" target="_blank">%s</a>', subdir, fname[1], label)
+  else
+    "-"
+}
+
+stats_df <- stats_df |>
+  mutate(
+    `KnotAnnotSV Report`   = map_chr(`Sample ID`, make_link, knot_files, "../annotations_sv/knotannotsv/html"),
+    `KnotAnnotSV XLSM`     = if (length(xl_files) > 0)
+                                map_chr(`Sample ID`, make_link, xl_files,
+                                        "../annotations_sv/knotannotsv/xl",
+                                        label = "download &#x2B07;")
+                              else
+                                "-",
+    `VEP (breakpoint)`     = if (length(vep_files) > 0)
+                                map_chr(`Sample ID`, make_link, vep_files, "../annotations_sv/ensemblvep/vep")
+                              else
+                                "-",
+    `IGV small (<1 kb)`    = if (length(igv_files) > 0)
+                                map_chr(`Sample ID`, make_link, igv_files, "../igv_reports",
+                                        suffix = "pass2\\.igv\\.small")
+                              else
+                                "-",
+    `IGV medium (1-10 kb)` = if (length(igv_files) > 0)
+                                map_chr(`Sample ID`, make_link, igv_files, "../igv_reports",
+                                        suffix = "pass2\\.igv\\.medium")
+                              else
+                                "-",
+    `IGV large (>=10 kb)`  = if (length(igv_files) > 0)
+                                map_chr(`Sample ID`, make_link, igv_files, "../igv_reports",
+                                        suffix = "pass2\\.igv\\.large")
+                              else
+                                "-"
+  )
+```
+
+
+```{r data-dict-loader, message = FALSE, warning = FALSE}
+# Load per-variant-type VCF header dictionaries emitted by CREATE_DATA_DICT
+# (one TSV per sample per variant type, from FILTER_{SV,CNA,SNV}). Union
+# across samples and dedup by (field_type, field_name) — descriptions are
+# stable across samples because they come from the same VCF-header block
+# for a given caller + AnnotSV run.
+load_data_dict <- function(subdir) {
+  if (!dir.exists(subdir)) return(tibble::tibble())
+  files <- Sys.glob(file.path(subdir, "*.data_dict.tsv"))
+  if (length(files) == 0) return(tibble::tibble())
+  dplyr::bind_rows(lapply(files, readr::read_tsv,
+                          show_col_types = FALSE,
+                          col_types = "cccccc")) |>
+    dplyr::distinct(field_type, field_name, .keep_all = TRUE)
+}
+
+dict_sv  <- load_data_dict("data_dict_sv")
+dict_cna <- load_data_dict("data_dict_cna")
+dict_snv <- load_data_dict("data_dict_snv")
+
+# Hand-curated overlay for columns computed inside this qmd (not present
+# in the VCF header). Overlay takes precedence over any VCF-header
+# definition of the same name — the qmd-side meaning is the authoritative
+# one for reviewers reading the DT tables. Do NOT paraphrase VCF-header
+# entries here; if the truthful description lives in the header, let the
+# dict TSV supply it.
+qmd_computed_defs <- tibble::tribble(
+  ~field_name,        ~description,
+  "SAMPLE",           "VCF sample-column value (from the source caller output; may differ from cohort sample_id if the caller renamed the sample)",
+  "sample_id",        "Cohort-facing sample identifier joined in from the params.sample_metadata CSV; NA when no metadata table was supplied",
+  "driver_tier",      "Prioritization tier: T1 = empirical T-ALL recurrence (ST17/ST19) OR oncogenic in the candidate panel; T2 = candidate-gene hit; T3 = other pass2 evidence",
+  "tier_score",       "Within-tier tie-breaker (recurrence count, candidate-gene count, or AnnotSV_ranking_score depending on tier)",
+  "breakpoint",       "Compact chr:pos display of the record's primary breakpoint (SV/BND) or interval start (CNA)",
+  "CytoBand_display", "chr<CHROM> prefix prepended to the AnnotSV CytoBand cell for a full-locus label",
+  "Gene_name_display","Semicolon-joined unique SYMBOL list, dedup'd from AnnotSV's full-mode + per-split-mode Gene_name concatenation",
+  "Candidate_genes",  "Intersection of Gene_name with the user candidate-gene panel (params.candidate_genes)",
+  "has_mate",         "Whether both ends of a BND event survived the filter (TRUE = mate pair present, FALSE = orphaned BND)",
+  "ST17_hit",         "One-line summary of the highest-scored SVTYPE-matched ST17 T-ALL recurrence BED hit(s)",
+  "ST17_name",        "Top-3 ST17 hit names (by score), pipe-outside-parens joined",
+  "ST17_score",       "Top-3 ST17 hit scores, paired positionally with ST17_name",
+  "ST19_hit",         "One-line summary of the top 3 SVTYPE-matched ST19 T-ALL recurrent-CNV BED hits (AMP / DEL / GAIN / LOSS union, ordered by score desc; format: \"hit1 [s1]; hit2 [s2]; hit3 [s3]\")",
+  "ST19_name",        "Top-3 ST19 hit names (score-ordered), pipe-joined; consolidated from name_ST19_Alterations.CNV.Recurrent_{AMP,DEL,GAIN,LOSS}",
+  "ST19_score",       "Top-3 ST19 hit scores, paired positionally with ST19_name; consolidated from score_ST19_Alterations.CNV.Recurrent_{AMP,DEL,GAIN,LOSS}",
+  "CNA_TYPE",         "Wakhan copy-number call type derived from CN1/CN2 (GAIN, LOSS, CNLOH); drives tier assignment and colour palette",
+  "WAKHAN_TYPE",      "Raw Wakhan classification (integer/integer/cnloh/…), preserved from the caller",
+  "CIViC_Consequence","VEP Consequence value from the CIViC INFO tag — compare to the top-level Consequence",
+  "CIViC_SYMBOL",     "Gene symbol from the CIViC INFO tag — compare to the top-level SYMBOL",
+  "CIViC_Variant_ID", "CIViC internal variant identifier",
+  "CIViC_Variant_URL","Deep link to the variant page on civicdb.org",
+  "CIViC_Entity_Variant_Origin", "CIViC assertion of variant origin (somatic / germline / unknown)",
+  "CIViC_Entity_Therapies",      "Therapies linked to the variant per CIViC evidence entries",
+  "CIViC_Assertion_ACMG_Codes",  "ACMG/AMP variant-classification codes attached to the CIViC assertion"
+)
+
+# Emit a small download-button HTML linking to the full data-dictionary TSV
+# for a given variant type. Relative path resolves against index.html once
+# both files are published under results/sv_report/ by publishDir.
+# Returns "" when no dict TSV is present so the caller can `cat()` it
+# unconditionally without leaking placeholders into the report.
+dict_download_button <- function(subdir, label) {
+  if (!dir.exists(subdir)) return("")
+  files <- Sys.glob(file.path(subdir, "*.data_dict.tsv"))
+  if (length(files) == 0) return("")
+  # Use the first (should be the only) file. Relative link so it works both
+  # in the raw index.html and via any static-file server.
+  rel <- files[1]
+  sprintf('<p style="margin:8px 0 4px 0;">
+  <a href="%s" download
+     style="display:inline-block; padding:8px 14px;
+            background:#0d6efd; color:#ffffff; text-decoration:none;
+            border-radius:5px; font-size:0.9em; font-weight:500;">
+    &#x2B07;&#xFE0F; Download full %s data dictionary (TSV)
+  </a>
+  <span style="font-size:0.82em; color:#666; margin-left:8px;">
+    Every VCF INFO / FORMAT / FILTER declaration for this variant type.
+    Join by field_name to the cohort_%s.tsv output for column definitions.
+  </span>
+</p>
+', rel, label, tolower(label))
+}
+
+# Render a compact "column definition" table for a display data frame.
+# Priority: qmd-computed overlay first; then VCF-header dict lookup;
+# blank when neither has a description (surfaces the gap to reviewers
+# so it can be filled in the overlay).
+render_data_dict <- function(display_df, dict_tbl, caption = NULL) {
+  cols <- names(display_df)
+  desc <- vapply(cols, function(c) {
+    hit_ov <- qmd_computed_defs$description[qmd_computed_defs$field_name == c]
+    if (length(hit_ov) > 0 && nzchar(hit_ov[1])) return(hit_ov[1])
+    if (nrow(dict_tbl) > 0) {
+      hit <- dict_tbl$description[dict_tbl$field_name == c]
+      if (length(hit) > 0 && nzchar(hit[1])) return(hit[1])
+    }
+    ""
+  }, character(1))
+  ftype <- vapply(cols, function(c) {
+    if (nrow(dict_tbl) > 0) {
+      hit <- dict_tbl$field_type[dict_tbl$field_name == c]
+      if (length(hit) > 0) return(hit[1])
+    }
+    ""
+  }, character(1))
+  ftype[!nzchar(ftype) & nzchar(desc)] <- "computed"
+  ftype[!nzchar(ftype)]                <- "unknown"
+
+  DT::datatable(
+    tibble::tibble(Column = cols, Kind = ftype, Definition = desc),
+    caption   = caption,
+    filter    = "none", rownames = FALSE, width = "100%",
+    options   = list(dom = "t", pageLength = 100, ordering = FALSE,
+                     autoWidth = TRUE,
+                     columnDefs = list(list(width = "18%", targets = 0),
+                                       list(width = "10%", targets = 1)))
+  )
+}
+```
+
+```{r valuebox-helpers, include = FALSE}
+# Value-box helper. Every KPI card uses vb_count(df_name, cond_fn) which
+# guards against the referenced data frame being missing (branch turned off
+# in the pipeline) or empty — yields 0 instead of throwing. cond_fn is a
+# function of the data frame returning a logical vector; sum() collapses.
+vb_count <- function(df_name, cond_fn) {
+  if (!exists(df_name)) return(0L)
+  df <- get(df_name)
+  if (!is.data.frame(df) || nrow(df) == 0) return(0L)
+  tryCatch(as.integer(sum(cond_fn(df), na.rm = TRUE)),
+           error = function(e) 0L)
+}
+
+# Defaults so the pure-markdown DISCO block on the Overview page can resolve
+# its inline `r ...` references even when disco-plot-prep / disco-plot-data
+# didn't fire (small cohorts with 0 Tier-1 records, or `disco_enable = FALSE`).
+# These are OVERRIDDEN by the DISCO data chunks below when they do run —
+# `<-` in a later chunk simply rebinds the name in the shared session.
+pp_host           <- if (!is.null(params$proteinpaint_host)   && nzchar(params$proteinpaint_host))   params$proteinpaint_host   else "http://localhost:3456"
+pp_genome         <- if (!is.null(params$proteinpaint_genome) && nzchar(params$proteinpaint_genome)) params$proteinpaint_genome else "hg38"
+disco_mlst_json   <- "[]"
+safe_cohort_label <- "Cohort"
+n_cohort_snv      <- 0L
+n_cohort_cna      <- 0L
+n_cohort_bnd      <- 0L
+n_cohort_samples  <- 0L
+sample_ids        <- character(0)
+lollipop_link_display <- tibble::tibble()
+```
+
+
+
+
+
+```{r load-pass2}
+# Load candidate-gene set unconditionally so downstream CNA / SNV chunks
+# always see `candidate_set` — even when the SV pass2-clean chunk (which
+# also assigns it) is skipped because pass2_long is empty.
+candidate_set <- load_candidate_gene_set()
+
+# SVTYPE / CNA_TYPE color palette (colorblind-safe Dark2 hues). Defined
+# here unconditionally so the CNA pass2 DT chunk can reuse it even when
+# the SV pass2-table chunk is skipped due to zero SV records.
+svtype_colors <- c(
+  BND = "#7570B3",  # purple
+  DEL = "#D95F02",  # orange
+  DUP = "#1B9E77",  # teal
+  INS = "#E7298A",  # magenta
+  INV = "#66A61E"   # green
+)
+
+pass2_files <- list.files(pattern = "\\.filtered\\.pass2\\.tsv$", full.names = TRUE)
+
+# Also accept the synthetic test fixture
+pass2_files <- c(pass2_files,
+                 list.files(pattern = "vembrane_pass2_syndata\\.tsv$", full.names = TRUE))
+
+pass2_long <- if (length(pass2_files) > 0) {
+  map_dfr(pass2_files, ~ read_tsv(.x, col_types = cols(.default = "c"),
+                                  show_col_types = FALSE))
+} else {
+  tibble()
+}
+
+# vembrane's long-format prepends a SAMPLE column with the sample name from VCF
+# FORMAT. Fall back to a filename-derived id if SAMPLE is absent (older outputs).
+if (nrow(pass2_long) > 0 && !"SAMPLE" %in% names(pass2_long)) {
+  pass2_long <- pass2_long |> mutate(SAMPLE = "unknown")
+}
+
+# Coerce numerics needed by plots
+if (nrow(pass2_long) > 0) {
+  pass2_long <- pass2_long |>
+    mutate(
+      ACMG_class_clean = acmg_factor(ACMG_class),
+      ranking_score    = suppressWarnings(as.numeric(scalar_first(AnnotSV_ranking_score)))
+    )
+}
+```
+
+```{r pass2-clean}
+#| eval: !expr nrow(pass2_long) > 0
+
+# Moved up from the DT chunk so plot-st17 counts and the sample-stats
+# `Custom Annot. Hits` tally see the same partner-validated ST17 columns
+# as the DT. The order matters:
+#   1. Strip vembrane InfoTuple wrapping
+#   2. Compute Candidate_genes from Gene_name 
+#   3. Cast ACMG_class to integer 1-5
+#   4. convert ST17 name/score cells whose SVTYPE suffix doesn't match the
+#      record's SVTYPE 
+#   5. BND partner-chromosome filter: keep ST17 BND name sub-elements
+#      where both reference breakpoints match (within 10 kb).
+pass2_long <- pass2_long |>
+  mutate(across(where(is.character), clean_tuple))
+
+# Collapse AnnotSV's `full,split,split,...` padding on every character
+# column (see clean_annot_padding docs). Runs after clean_tuple so any
+# InfoTuple decoration is stripped first.
+pass2_long <- pass2_long |>
+  mutate(across(where(is.character), \(v) vapply(v, clean_annot_padding, character(1), USE.NAMES = FALSE)))
+
+candidate_set <- load_candidate_gene_set()
+# Union candidate-gene detection across Gene_name + Closest_left + Closest_right.
+# The two Closest_* columns capture nearest-flanking genes when the SV falls
+# in intergenic space — essential for BND breakpoints whose fusion partner
+# is a driver gene that the SV interval itself doesn't overlap.
+if (length(candidate_set) > 0 && "Gene_name" %in% names(pass2_long)) {
+  closest_l <- if ("Closest_left"  %in% names(pass2_long)) pass2_long$Closest_left  else rep("", nrow(pass2_long))
+  closest_r <- if ("Closest_right" %in% names(pass2_long)) pass2_long$Closest_right else rep("", nrow(pass2_long))
+  pass2_long <- pass2_long |>
+    mutate(Candidate_genes = pmap_chr(
+      list(Gene_name, closest_l, closest_r),
+      function(gn, cl, cr) compute_candidate_genes(gn, cl, cr, candidate_set)
+    ))
+} else {
+  pass2_long$Candidate_genes <- ""
+}
+
+pass2_clean <- pass2_long |>
+  mutate(ACMG_class = acmg_clean(ACMG_class)) |>
+  select(-any_of("Annotation_mode"))
+
+# Uniquify the ClinVar_SV_CLNSIG cell so a row overlapping 50 ClinVar records
+# with the same "Pathogenic" label shows a single "Pathogenic" instead of a
+# 50-element repeat wall.
+if ("ClinVar_SV_CLNSIG" %in% names(pass2_clean)) {
+  pass2_clean <- pass2_clean |>
+    mutate(ClinVar_SV_CLNSIG = vapply(ClinVar_SV_CLNSIG, clean_clinvar_clnsig,
+                                     character(1), USE.NAMES = FALSE))
+}
+
+# Round hVAF (HP1, HP2, unphased triple) to 2 decimal places so the DT reads
+# "0.80,0.00,0.00" instead of "0.800000011920929,0.0,0.0".
+if ("hVAF" %in% names(pass2_clean)) {
+  pass2_clean <- pass2_clean |>
+    mutate(hVAF = vapply(hVAF, format_hvaf, character(1), USE.NAMES = FALSE))
+}
+
+# breakpoint column: "chr21:100000-110000" for intra-chromosomal, or
+# "chr21:100000|chr5:300000" for interchromosomal BNDs.
+if (all(c("CHROM", "POS", "ALT", "SVTYPE") %in% names(pass2_clean))) {
+  end_col <- if ("END" %in% names(pass2_clean)) pass2_clean$END else pass2_clean$POS
+  pass2_clean <- pass2_clean |>
+    mutate(breakpoint = compute_breakpoint(CHROM, POS, end_col, ALT, SVTYPE))
+}
+
+# Blank ST17 cells (name_ST17_* and score_ST17_*) whose suffix mismatches the record's SVTYPE. cur_column() extracts the suffix 
+# convert the BND hits that intrachromosomal to be the intformation from the ST17 DEL, since ST17 BND is only interchromosomal translocations per authors definitions
+pass2_clean <- pass2_clean |>
+  mutate(intrachomosomal = purrr::map_lgl(.x = breakpoint, .f = ~chk_intra_bnd(.x))) |>
+  mutate(name_ST17_BND = case_when(
+    SVTYPE == "BND" & intrachomosomal == TRUE ~ name_ST17_DEL,
+    TRUE ~ name_ST17_BND
+  ), 
+  score_ST17_BND = case_when(
+    SVTYPE == "BND" & intrachomosomal == TRUE ~ score_ST17_DEL,
+    TRUE ~ score_ST17_BND
+  )) %>% 
+  mutate(across(
+    matches("^(name|score)_ST17_(BND|DEL|DUP|INS|INV)$"),
+    ~ ifelse(SVTYPE == sub("^(name|score)_ST17_", "", cur_column()), as.character(.x), "")
+  ))
+
+# BND partner-chromosome filter (see helper docs in setup chunk).
+if (all(c("name_ST17_BND", "CHROM", "POS", "ALT", "SVTYPE") %in% names(pass2_clean))) {
+  pass2_clean <- pass2_clean |>
+    mutate(name_ST17_BND = pmap_chr(
+      list(SVTYPE, CHROM, POS, ALT, name_ST17_BND),
+      function(svt, chrom, pos, alt, nm) {
+        if (svt != "BND") return(as.character(nm))
+        filter_bnd_st17_name(chrom, pos, alt, nm)
+      }
+    ))
+}
+
+#  Driver-tier ranking + display-only columns 
+# Compute one collapsed ST17 hit + score per row (SVTYPE-matched — the
+# other 4 name_ST17_/score_ST17_ columns are already blanked by the earlier
+# suffix-mismatch mutate). ST17_hit is empty when no ST17 evidence exists.
+st17_name_col <- function(svt) {
+  switch(svt,
+         BND = "name_ST17_BND", DEL = "name_ST17_DEL",
+         DUP = "name_ST17_DUP", INS = "name_ST17_INS",
+         INV = "name_ST17_INV", NA_character_)
+}
+st17_score_col <- function(svt) sub("^name_", "score_", st17_name_col(svt))
+
+pick_st17 <- function(df, picker) {
+  vapply(seq_len(nrow(df)), function(i) {
+    col <- picker(df$SVTYPE[i])
+    if (is.na(col) || !(col %in% names(df))) return("")
+    val <- df[[col]][i]
+    if (is.na(val)) "" else as.character(val)
+  }, character(1))
+}
+
+pass2_clean <- pass2_clean |>
+  mutate(
+    ST17_name_raw  = pick_st17(pick(everything()), st17_name_col),
+    ST17_score_raw = pick_st17(pick(everything()), st17_score_col)
+  )
+
+# Pair-split name + score together, dedup, order by score desc, truncate to
+# top 3 hits. Both output columns keep the same ordering so the k-th name
+# always pairs with the k-th score.
+st17_pairs <- purrr::map2(pass2_clean$ST17_name_raw, pass2_clean$ST17_score_raw,
+                          ~ parse_st17_pair(.x, .y, top_n = 3L))
+
+pass2_clean <- pass2_clean |>
+  mutate(
+    ST17_name  = vapply(st17_pairs, `[[`, character(1), "names"),
+    ST17_score = vapply(st17_pairs, `[[`, character(1), "scores"),
+    # ST17_hit renders the top-3 pairs as "hit1 [s1]; hit2 [s2]; hit3 [s3]".
+    # Blank when no ST17 evidence exists. When a score is missing (padded
+    # NA slot from AnnotSV pipe-mismatch), the score bracket is omitted for
+    # that entry.
+    ST17_hit = vapply(seq_along(ST17_name), function(i) {
+      nm <- ST17_name[i]; sc <- ST17_score[i]
+      if (!nzchar(nm)) return("")
+      nms <- split_pipe_outside_parens(nm)
+      scs <- if (nzchar(sc)) str_split(sc, "\\|")[[1]] else rep("", length(nms))
+      length(scs) <- length(nms)
+      scs[is.na(scs)] <- ""
+      pieces <- vapply(seq_along(nms), function(j) {
+        if (nzchar(scs[j])) paste0(nms[j], " [", scs[j], "]") else nms[j]
+      }, character(1))
+      paste(pieces, collapse = "; ")
+    }, character(1))
+  ) |>
+  select(-ST17_name_raw, -ST17_score_raw)
+
+tier_tbl   <- assign_driver_tier(
+  pass2_clean$ST17_name,
+  pass2_clean$ST17_score,
+  pass2_clean$Candidate_genes,
+  pass2_clean$AnnotSV_ranking_score
+)
+pass2_clean <- bind_cols(pass2_clean, tier_tbl)
+
+# Tier-3 MINDA-only filter. T3 records passed the pass2 gate on generic
+# evidence (P_gain, RE_gene, ClinVar pathogenic, ACMG 3-5) but carry
+# neither an ST17 T-ALL cohort hit (T1) nor a candidate-gene overlap (T2).
+# For that tier, require consensus support: keep only records whose CALLER
+# field indicates MINDA (Severus+SAVANA joint call), drop Severus-only
+# T3 hits. T1/T2 are unaffected — biological drivers with clear evidence
+# survive regardless of caller consensus, matching the pass2 filter's
+# clause A rescue logic.
+# CALLER field values seen in pipeline: "SEVERUS", "SAVANA", "MINDA".
+# We match "MINDA" substring-inclusively (grepl) so future extensions like
+# "MINDA;SEVERUS" or a comma-joined multi-call marker still pass.
+#
+# Defensive ST17 rescue: keep any record with a populated ST17_hit even
+# if it lands in T3 under a future re-tiering (currently T3 excludes ST17
+# hits by definition — they'd be T1 — but this guard makes the filter
+# resilient to changes in assign_driver_tier() so a T-ALL recurrent hit
+# is never silently dropped by the caller-consensus gate).
+if ("CALLER" %in% names(pass2_clean)) {
+  st17_present <- if ("ST17_hit" %in% names(pass2_clean)) nzchar(pass2_clean$ST17_hit)
+                  else rep(FALSE, nrow(pass2_clean))
+  pass2_clean <- pass2_clean |>
+    filter(!(driver_tier == 3L & !grepl("MINDA", CALLER, fixed = TRUE) & !st17_present))
+}
+
+# Dedup Gene_name so the cohort TSV holds "SYMBOL_A; SYMBOL_B" instead of
+# AnnotSV's raw full-mode-`|`-joined + split-mode-`,`-repeated concatenation
+# (e.g. "LOC1|LOC2|LOC3,LOC1,LOC2,LOC3"). Idempotent — already-clean strings
+# round-trip. Keeps Gene_name usable as a stable output-CSV column while
+# Gene_name_display remains the DT-friendly capped variant.
+if ("Gene_name" %in% names(pass2_clean)) {
+  pass2_clean <- pass2_clean |>
+    mutate(Gene_name = vapply(Gene_name, dedup_annot_multi,
+                              character(1), USE.NAMES = FALSE))
+}
+
+# Dedup CytoBand across full/split annotation modes. AnnotSV emits one
+# cytoband per gene under split-mode, so multi-gene SVs produce runs like
+# "q21.1-q21.3,q21.1,q21.1,q21.2,q21.2,q21.2,...". First dedup to the
+# unique set; then collapse to a single "<min>-<max>" encompassing range
+# via collapse_cytoband_range() so large SVs don't produce a 30+ band
+# semicolon salad in the DT (matches the CNA-side treatment).
+if ("CytoBand" %in% names(pass2_clean)) {
+  pass2_clean <- pass2_clean |>
+    mutate(
+      CytoBand = vapply(CytoBand, dedup_annot_multi,
+                        character(1), USE.NAMES = FALSE),
+      CytoBand = vapply(CytoBand, collapse_cytoband_range,
+                        character(1), USE.NAMES = FALSE)
+    )
+}
+
+# Cap the Gene_name display at 20 genes; append "(n=X genes)" annotation
+# when capped so the reader knows the underlying multiplicity. Uses AnnotSV's
+# Gene_count column as the authoritative gene tally.
+pass2_clean <- pass2_clean |>
+  mutate(Gene_name_display = pmap_chr(
+    list(Gene_name, Gene_count),
+    function(g, n) summarize_gene_list(g, n, cap = 20L)
+  ))
+
+# CytoBand display: prepend "chr<CHROM>" to the (already-deduped) band label
+# so a clinician reads "chr9p21" instead of a bare "p21". Requires both CHROM
+# and CytoBand present; leaves cells blank when either is missing.
+if (all(c("CHROM", "CytoBand") %in% names(pass2_clean))) {
+  pass2_clean <- pass2_clean |>
+    mutate(CytoBand_display = ifelse(
+      !is.na(CytoBand) & nzchar(CytoBand) & CytoBand != ".",
+      paste0(ifelse(startsWith(as.character(CHROM), "chr"), as.character(CHROM),
+                    paste0("chr", CHROM)),
+             CytoBand),
+      ""
+    ))
+}
+
+# Optional EnsDb-based BND breakend gene annotation. Skips silently when
+# params$ensembl_db is unset OR the file doesn't exist. Handles contigs
+# that aren't in the EnsDb (chrUn_*, alt scaffolds, decoys) by filling
+# `"unknown_contig:pos"` for the missing side instead of crashing the
+# whole join. Uses a single vectorized `plyranges::join_nearest` over
+# ALL breakpoints at once (no rowwise) so cost is O(N log M) not O(N * M).
+# Only trigger the (potentially slow) Bioc install when the EnsDb SQLite is
+# actually staged — otherwise the annotation block would skip anyway.
+if (!is.null(params$ensembl_db) && nzchar(params$ensembl_db) &&
+    file.exists(params$ensembl_db)) {
+  install_bioc_if_missing("ensembldb")
+  install_bioc_if_missing("plyranges")
+}
+
+edb_annot_available <- !is.null(params$ensembl_db) &&
+                        nzchar(params$ensembl_db) &&
+                        file.exists(params$ensembl_db) &&
+                        requireNamespace("ensembldb", quietly = TRUE) &&
+                        requireNamespace("plyranges", quietly = TRUE)
+
+if (edb_annot_available && nrow(pass2_clean) > 0 &&
+    all(c("breakpoint", "SVTYPE", "ID") %in% names(pass2_clean))) {
+
+  # Load EnsDb once. GENOME-wide EnsDb includes primary chromosomes 1-22/X/Y/MT.
+  edb <- ensembldb::EnsDb(params$ensembl_db)
+  # `canonical_transcript` and `gene_biotype` are needed beyond the gene label:
+  # the ProteinPaint svfusion export needs an isoform accession per breakend, and
+  # biotype is the tie-breaker below. ensembldb does not always surface every
+  # underlying gene-table column, so degrade gracefully to gene_name only.
+  ens_genes_gr <- tryCatch(
+    ensembldb::genes(edb, columns = c("gene_id", "gene_name",
+                                      "canonical_transcript", "gene_biotype")),
+    error = function(e) {
+      warning("EnsDb: canonical_transcript/gene_biotype unavailable (",
+              conditionMessage(e), "); falling back to gene_name only.")
+      ensembldb::genes(edb, columns = c("gene_id", "gene_name"))
+    })
+  for (cc in c("canonical_transcript", "gene_biotype")) {
+    if (!cc %in% names(S4Vectors::mcols(ens_genes_gr)))
+      S4Vectors::mcols(ens_genes_gr)[[cc]] <- NA_character_
+  }
+  # join_nearest keeps the QUERY strand ('*' from bp_in_gr), not the subject's,
+  # so the gene's own strand must travel as a metadata column.
+  ens_genes_gr$gene_strand <- as.character(BiocGenerics::strand(ens_genes_gr))
+  # Some EnsDb rows have empty gene_name — fall back to gene_id so the
+  # annotation always has a non-empty label.
+  ens_genes_gr$gene_name <- ifelse(
+    is.na(ens_genes_gr$gene_name) | !nzchar(ens_genes_gr$gene_name),
+    ens_genes_gr$gene_id, ens_genes_gr$gene_name
+  )
+  ens_seqs <- as.character(GenomeInfoDb::seqlevels(ens_genes_gr))
+
+  # Vectorized breakpoint parser — always emits TWO rows per record
+  # (left + right anchor) regardless of SVTYPE. Downstream `pivot_wider`
+  # produces `gene_name_left`, `distance_left`, `gene_name_right`,
+  # `distance_right` columns for every record. Handles three breakpoint
+  # shapes emitted by `compute_breakpoint()`:
+  #   1. Interchromosomal BND        chrA:posA|chrB:posB
+  #   2. Non-BND range (DEL/DUP/INV) chr:start-end
+  #   3. Single-point (INS, or END==POS) chr:pos
+  # In case (3) left == right (same position). Case (1) matches BND
+  # SVTYPE; case (2) matches DEL/DUP/INV; case (3) matches INS or any
+  # SVTYPE where END was missing / equal to POS.
+  #
+  # `distance` from `join_nearest` is 0 if the anchor is inside the gene,
+  # positive if the anchor is outside (upstream of the left anchor =
+  # negative offset from gene start / downstream of the right anchor =
+  # positive offset from gene end). Kept as the raw absolute distance
+  # in bp; the direction is implicit from which anchor (left / right).
+  bp_split <- function(bp, sv, rid) {
+    if (is.na(bp) || !nzchar(bp)) return(NULL)
+    sides <- str_split(bp, "\\|")[[1]]
+
+    # Case 1: interchromosomal BND (two |-separated chr:pos anchors)
+    if (length(sides) == 2) {
+      m1 <- str_match(sides[1], "^(chr[^:]+):([0-9]+)$")
+      m2 <- str_match(sides[2], "^(chr[^:]+):([0-9]+)$")
+      if (any(is.na(m1[1, ]) | is.na(m2[1, ]))) return(NULL)
+      return(data.frame(
+        ID       = c(rid, rid),
+        side     = c("left", "right"),
+        seqnames = c(sub("^chr", "", m1[1, 2]),
+                     sub("^chr", "", m2[1, 2])),
+        start    = as.integer(c(m1[1, 3], m2[1, 3])),
+        stringsAsFactors = FALSE
+      ))
+    }
+
+    # Case 2: non-BND range (DEL / DUP / INV) — one chr, two positions
+    m <- str_match(sides[1], "^(chr[^:]+):([0-9]+)-([0-9]+)$")
+    if (!is.na(m[1, 1])) {
+      return(data.frame(
+        ID       = c(rid, rid),
+        side     = c("left", "right"),
+        seqnames = sub("^chr", "", m[1, 2]),
+        start    = as.integer(c(m[1, 3], m[1, 4])),
+        stringsAsFactors = FALSE
+      ))
+    }
+
+    # Case 3: single-point (INS with END==POS, or SVTYPE where END is
+    # missing) — left == right. Distance columns will match on both sides.
+    m <- str_match(sides[1], "^(chr[^:]+):([0-9]+)$")
+    if (!is.na(m[1, 1])) {
+      p <- as.integer(m[1, 3])
+      return(data.frame(
+        ID       = c(rid, rid),
+        side     = c("left", "right"),
+        seqnames = sub("^chr", "", m[1, 2]),
+        start    = c(p, p),
+        stringsAsFactors = FALSE
+      ))
+    }
+
+    NULL
+  }
+
+  bp_df <- purrr::pmap(
+    list(pass2_clean$breakpoint, pass2_clean$SVTYPE, pass2_clean$ID),
+    bp_split
+  ) |> purrr::compact() |> dplyr::bind_rows()
+
+  if (nrow(bp_df) > 0) {
+    bp_df$end <- bp_df$start + 1L
+    # Split into in-EnsDb vs out-of-EnsDb before the join to avoid
+    # 0-hit crashes for contigs like `chrUn_GL000219v1`.
+    bp_in  <- bp_df |> dplyr::filter(seqnames %in% ens_seqs)
+    bp_out <- bp_df |> dplyr::filter(!(seqnames %in% ens_seqs)) |>
+      dplyr::mutate(gene_name = "unknown_contig", distance = NA_integer_)
+
+    if (nrow(bp_in) > 0) {
+      bp_in_gr <- plyranges::as_granges(bp_in)
+      # join_nearest can emit multiple rows per (ID, side) when several
+      # equidistant genes tie for nearest. Keep one row per anchor so the
+      # downstream pivot_wider produces atomic character columns instead
+      # of list-columns (which break coalesce in mlst_bnd).
+      # TIE-BREAK IS NOT COSMETIC. A breakpoint frequently falls inside more than
+      # one annotated feature, and every one has distance 0, so an unordered
+      # `distinct()` keeps whichever row sorted first. Observed 2026-09-17:
+      # chr9:131151786 lies inside BOTH NUP214 (protein_coding) and
+      # ENSG00000236986 (an unnamed lncRNA); the unordered pick took the lncRNA
+      # and mislabelled SET::NUP214 — the canonical T-ALL fusion from
+      # del(9)(q34.11q34.13) — as SET::ENSG00000236986.
+      #
+      # Order before slicing: nearest, then protein_coding ahead of other
+      # biotypes, then named symbols ahead of bare ENSG ids, then tightest
+      # interval. Deterministic and biologically sensible.
+      hits <- plyranges::join_nearest(
+                bp_in_gr,
+                dplyr::select(ens_genes_gr, gene_name, canonical_transcript,
+                              gene_biotype, gene_strand),
+                distance = TRUE) |>
+        tibble::as_tibble() |>
+        dplyr::select(ID, side, gene_name, canonical_transcript,
+                      gene_biotype, gene_strand, distance, width) |>
+        dplyr::arrange(ID, side, distance,
+                       dplyr::coalesce(gene_biotype, "zzz") != "protein_coding",
+                       startsWith(gene_name, "ENSG"),
+                       width) |>
+        dplyr::distinct(ID, side, .keep_all = TRUE) |>
+        dplyr::select(-width)
+    } else hits <- tibble::tibble(ID = character(), side = character(),
+                                    gene_name = character(),
+                                    canonical_transcript = character(),
+                                    gene_biotype = character(),
+                                    gene_strand = character(),
+                                    distance = integer())
+
+    bp_out_hits <- bp_out |>
+      dplyr::mutate(canonical_transcript = NA_character_,
+                    gene_biotype         = NA_character_,
+                    gene_strand          = NA_character_) |>
+      dplyr::select(ID, side, gene_name, canonical_transcript,
+                    gene_biotype, gene_strand, distance)
+    all_hits <- dplyr::bind_rows(hits, bp_out_hits)
+
+    # Every record now has a `left` and a `right` row (see bp_split
+    # docs). Pivot to per-side gene / distance columns so every record
+    # ends up with 4 new columns: gene_name_left, distance_left,
+    # gene_name_right, distance_right.
+    lr <- all_hits |>
+      dplyr::filter(side %in% c("left", "right")) |>
+      tidyr::pivot_wider(id_cols     = ID,
+                         names_from  = side,
+                         values_from = c(gene_name, canonical_transcript,
+                                         gene_strand, distance),
+                         names_glue  = "{.value}_{side}")
+
+    pass2_clean <- pass2_clean |>
+      dplyr::left_join(lr, by = "ID") |>
+      dplyr::mutate(
+        # For BNDs the pair reads as a fusion (matches ST17_hit shape:
+        # `GENE_A::GENE_B`). For non-BND records the two anchors are on
+        # the same chromosome so use an ASCII arrow to show the local range.
+        # ENSG identifiers are preserved when EnsDb had no HGNC symbol —
+        # they carry biological meaning (pseudogene, lincRNA, novel locus)
+        # and should not be silently masked. `unknown_contig` from the
+        # bp_out fallback is passed through unchanged.
+
+        edb_gene_pair = dplyr::case_when(
+          SVTYPE == "BND" & !is.na(gene_name_left) & !is.na(gene_name_right) ~
+            paste0(gene_name_left, "::", gene_name_right),
+          !is.na(gene_name_left) & !is.na(gene_name_right) ~
+            paste0(gene_name_left, " <-> ", gene_name_right),
+          TRUE ~ NA_character_
+        ),
+        # Compact distance summary — "L: 0 bp; R: 12503 bp" reads at a
+        # glance; distance == 0 means the anchor lies inside the gene.
+        edb_gene_distance = dplyr::case_when(
+          !is.na(distance_left) & !is.na(distance_right) ~
+            sprintf("L: %s bp; R: %s bp", distance_left, distance_right),
+          TRUE ~ NA_character_
+        )
+      )
+  }
+}
+
+# has_mate — True when both _1 and _2 mates of a BND survive pass2.
+# Simple: strip trailing `_1` / `_2` and count records per stripped ID.
+# Non-BND records (no _1/_2 suffix) get has_mate = FALSE (mate concept
+# doesn't apply). Useful for sort / filter in the DT: T1 BND records
+# with has_mate=TRUE are the highest-confidence fusion calls.
+pass2_clean <- pass2_clean |>
+  group_by(ID_SHORT = str_remove(as.character(ID), "_[12]$")) |>
+  mutate(has_mate = (SVTYPE == "BND" & dplyr::n() == 2L)) |>
+  ungroup() |>
+  select(-ID_SHORT)
+
+# Attach full sample_metadata (all cohort fields) so the cohort TSV carries
+# clinical context — sex, age, EGIL, ETP, karyotype, driver fusions, ITD, etc.
+# No-op when the metadata CSV wasn't supplied.
+pass2_clean <- merge_sample_metadata(pass2_clean)
+
+# Emit the cohort-level SV pass2 TSV (full schema, RE_gene retained,
+# Closest_left/Closest_right + new driver_tier / tier_score / ST17_hit /
+# Gene_name_display + CytoBand_display + has_mate columns included). The
+# SV_REPORT_INDEX module declares `optional: true` on tsv_sv so the write
+# being suppressed by the chunk-level guard is OK when pass2 is empty.
+readr::write_tsv(pass2_clean, "cohort_sv_pass2.tsv", na = "NA")
+```
+
+```{r load-cna-pass2}
+# CNA pass2 TSVs live under `cna_pass2/` to avoid colliding with the SV
+# pass2 glob above — both file shapes end in `.filtered.pass2.tsv`.
+# CN-specific columns: TCN/CN1/CN2/CNQ1/CNQ2/COV1/COV2 (vs. SV's VAF/hVAF/DR/DV)
+
+cna_pass2_files <- list.files(
+  path       = "cna_pass2",
+  pattern    = "\\.filtered\\.pass2\\.tsv$",
+  full.names = TRUE
+)
+
+cna_pass2_long <- if (length(cna_pass2_files) > 0) {
+  map_dfr(cna_pass2_files, ~ read_tsv(.x, col_types = cols(.default = "c"),
+                                      show_col_types = FALSE))
+} else {
+  tibble()
+}
+
+if (nrow(cna_pass2_long) > 0 && !"SAMPLE" %in% names(cna_pass2_long)) {
+  cna_pass2_long <- cna_pass2_long |> mutate(SAMPLE = "unknown")
+}
+
+# Derive a per-record CNA type from ALT (`<DUP>` -> "DUP") because SVTYPE in
+# Wakhan VCFs is uniformly "CNV" and doesn't differentiate gain vs. loss.
+if (nrow(cna_pass2_long) > 0) {
+  cna_pass2_long <- cna_pass2_long |>
+    mutate(
+      CNA_TYPE         = str_remove_all(as.character(ALT), "[<>]"),
+      ACMG_class_clean = acmg_factor(ACMG_class)
+    )
+}
+```
+
+```{r cna-pass2-clean}
+#| eval: !expr nrow(cna_pass2_long) > 0
+
+
+# write the cohort TSV 
+cna_pass2_long <- cna_pass2_long |>
+  mutate(across(where(is.character), clean_tuple))
+
+# Union candidate-gene detection across Gene_name + Closest_left + Closest_right
+if (length(candidate_set) > 0 && "Gene_name" %in% names(cna_pass2_long)) {
+  closest_l <- if ("Closest_left"  %in% names(cna_pass2_long)) cna_pass2_long$Closest_left  else rep("", nrow(cna_pass2_long))
+  closest_r <- if ("Closest_right" %in% names(cna_pass2_long)) cna_pass2_long$Closest_right else rep("", nrow(cna_pass2_long))
+  cna_pass2_long <- cna_pass2_long |>
+    mutate(Candidate_genes = pmap_chr(
+      list(Gene_name, closest_l, closest_r),
+      function(gn, cl, cr) compute_candidate_genes(gn, cl, cr, candidate_set)
+    ))
+} else {
+  cna_pass2_long$Candidate_genes <- ""
+}
+
+cna_pass2_clean <- cna_pass2_long |>
+  mutate(ACMG_class = acmg_clean(ACMG_class)) |>
+  select(-any_of("Annotation_mode")) |>
+  mutate(Gene_name_display = pmap_chr(
+    list(Gene_name, Gene_count),
+    function(g, n) summarize_gene_list(g, n, cap = 20L)
+  ))
+
+# breakpoint column: "chr21:13000002-31877979" for Wakhan CNA segments. Wakhan records are always intra-chromosomal
+if (all(c("CHROM", "POS", "END", "ALT") %in% names(cna_pass2_clean))) {
+  svtype_col <- if ("SVTYPE" %in% names(cna_pass2_clean)) cna_pass2_clean$SVTYPE else rep("CNV", nrow(cna_pass2_clean))
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(breakpoint = compute_breakpoint(CHROM, POS, END, ALT, svtype_col))
+}
+
+# Parse WAKHAN_TYPE (GAIN / LOSS) from WAKHAN_ID's second colon-separated
+# WAKHAN_ID format: "wakhan:GAIN:chr21:13000002-31877979".
+# Falls back to the ALT-derived CNA_TYPE if WAKHAN_ID is missing 
+if ("WAKHAN_ID" %in% names(cna_pass2_clean)) {
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(WAKHAN_TYPE = case_when(
+      !is.na(WAKHAN_ID) & nzchar(WAKHAN_ID) ~ str_split_fixed(WAKHAN_ID, ":", 3)[, 2],
+      CNA_TYPE == "DUP" ~ "GAIN",
+      CNA_TYPE == "DEL" ~ "LOSS",
+      TRUE ~ ""
+    ))
+} else {
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(WAKHAN_TYPE = case_when(
+      CNA_TYPE == "DUP" ~ "GAIN",
+      CNA_TYPE == "DEL" ~ "LOSS",
+      TRUE ~ ""
+    ))
+}
+
+# Summarize P_gain_source / P_loss_source / P_ins_source 
+# DT shows the count and first-3 exemplars of each source
+p_source_cols <- intersect(
+  c("P_gain_source", "P_loss_source", "P_ins_source"),
+  names(cna_pass2_clean)
+)
+if (length(p_source_cols) > 0) {
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(across(all_of(p_source_cols),
+                  ~ vapply(.x, summarize_p_source, character(1),
+                           USE.NAMES = FALSE)))
+}
+
+#  ST19 name/score cells match the CNA type suffix (AMP/DEL/GAIN/LOSS) 
+cna_pass2_clean <- cna_pass2_clean |>
+  mutate(across(
+    matches("^(name|score)_ST19_Alterations\\.CNV\\.Recurrent_(AMP|DEL|GAIN|LOSS)$"),
+    function(col_vals) {
+      suffix <- sub("^(name|score)_ST19_Alterations\\.CNV\\.Recurrent_", "",
+                    cur_column())
+      is_gain_like <- (WAKHAN_TYPE == "GAIN" | CNA_TYPE == "DUP")
+      is_loss_like <- (WAKHAN_TYPE == "LOSS" | CNA_TYPE == "DEL")
+      keep <- (is_gain_like & suffix %in% c("AMP", "GAIN")) |
+              (is_loss_like & suffix %in% c("DEL", "LOSS"))
+      ifelse(keep, as.character(col_vals), "")
+    }
+  ))
+
+# CNA driver-priority tier 
+cna_tier_tbl <- assign_driver_tier_cna(
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_AMP"]],
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_DEL"]],
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_GAIN"]],
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_LOSS"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_AMP"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_DEL"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_GAIN"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_LOSS"]],
+  cna_pass2_clean$Candidate_genes,
+  cna_pass2_clean$AnnotSV_ranking_score
+)
+cna_pass2_clean <- bind_cols(cna_pass2_clean, cna_tier_tbl)
+
+# Consolidate the 4 SVTYPE-matched ST19 name / score columns into a single
+# top-3 hit summary — mirrors the ST17 pattern on the SV side (see the
+# `pass2-clean` chunk). Rationale: the 8 raw ST19 columns are noisy (per-
+# BED cells padded with `.,.,.` and misaligned between name and score
+# order), which makes the DT hard to read. This block:
+#   * Concatenates the 4 SVTYPE-matched `name_ST19_*` cells and the 4
+#     `score_ST19_*` cells into pipe-joined raw strings (the earlier
+#     SVTYPE-mismatch blanking has already left only the correct suffix
+#     populated per record — GAIN+AMP for GAIN-like, DEL+LOSS for LOSS-like).
+#   * Runs the same `parse_st17_pair()` helper (name-agnostic despite its
+#     ST17 naming): splits by `|`, pairs by index, dedups by name,
+#     orders by score desc, truncates to top-3.
+#   * Emits three consolidated columns: `ST19_name`, `ST19_score`, and
+#     `ST19_hit` (which renders "hit1 [s1]; hit2 [s2]; hit3 [s3]" for the DT).
+# The raw 8 columns are retained in cna_pass2_clean for TSV export (they
+# still land in cohort_cna_pass2.tsv) but dropped from the DT display below.
+join_pipe_cells <- function(...) {
+  parts <- as.character(c(...))
+  parts <- parts[!is.na(parts) & nzchar(parts) & parts != "."]
+  if (length(parts) == 0) return("")
+  paste(parts, collapse = "|")
+}
+
+st19_name_raw <- mapply(
+  join_pipe_cells,
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_AMP"]],
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_DEL"]],
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_GAIN"]],
+  cna_pass2_clean[["name_ST19_Alterations.CNV.Recurrent_LOSS"]],
+  USE.NAMES = FALSE
+)
+st19_score_raw <- mapply(
+  join_pipe_cells,
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_AMP"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_DEL"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_GAIN"]],
+  cna_pass2_clean[["score_ST19_Alterations.CNV.Recurrent_LOSS"]],
+  USE.NAMES = FALSE
+)
+
+st19_pairs <- purrr::map2(st19_name_raw, st19_score_raw,
+                          ~ parse_st17_pair(.x, .y, top_n = 3L))
+
+cna_pass2_clean <- cna_pass2_clean |>
+  mutate(
+    ST19_name  = vapply(st19_pairs, `[[`, character(1), "names"),
+    ST19_score = vapply(st19_pairs, `[[`, character(1), "scores"),
+    ST19_hit   = vapply(seq_along(ST19_name), function(i) {
+      nm <- ST19_name[i]; sc <- ST19_score[i]
+      if (!nzchar(nm)) return("")
+      nms <- split_pipe_outside_parens(nm)
+      scs <- if (nzchar(sc)) str_split(sc, "\\|")[[1]] else rep("", length(nms))
+      length(scs) <- length(nms)
+      scs[is.na(scs)] <- ""
+      pieces <- vapply(seq_along(nms), function(j) {
+        if (nzchar(scs[j])) paste0(nms[j], " [", scs[j], "]") else nms[j]
+      }, character(1))
+      paste(pieces, collapse = "; ")
+    }, character(1))
+  )
+
+# Same cleanup pass as SV: strip AnnotSV `full,split,split,...` padding
+# from every character column, then dedup Gene_name / CytoBand across
+# full/split modes, then compute CytoBand_display = "chr<CHROM><band>".
+cna_pass2_clean <- cna_pass2_clean |>
+  mutate(across(where(is.character), \(v) vapply(v, clean_annot_padding, character(1), USE.NAMES = FALSE)))
+
+if ("Gene_name" %in% names(cna_pass2_clean)) {
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(Gene_name = vapply(Gene_name, dedup_annot_multi,
+                              character(1), USE.NAMES = FALSE))
+}
+
+if ("CytoBand" %in% names(cna_pass2_clean)) {
+  # Two-step cleanup: dedup_annot_multi() first turns the raw AnnotSV
+  # full+split cell into a semicolon-joined unique-list; then
+  # collapse_cytoband_range() folds that list to a single "<min>-<max>"
+  # range so the DT shows "q23.31-q26.3" instead of 30+ semicolon-joined
+  # sub-bands. Large-segment CNAs (very common on chr9p21, chr10q, etc.)
+  # were the pain point that motivated this.
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(
+      CytoBand = vapply(CytoBand,       dedup_annot_multi,
+                        character(1), USE.NAMES = FALSE),
+      CytoBand = vapply(CytoBand,       collapse_cytoband_range,
+                        character(1), USE.NAMES = FALSE)
+    )
+}
+
+if (all(c("CHROM", "CytoBand") %in% names(cna_pass2_clean))) {
+  cna_pass2_clean <- cna_pass2_clean |>
+    mutate(CytoBand_display = ifelse(
+      !is.na(CytoBand) & nzchar(CytoBand) & CytoBand != ".",
+      paste0(ifelse(startsWith(as.character(CHROM), "chr"), as.character(CHROM),
+                    paste0("chr", CHROM)),
+             CytoBand),
+      ""
+    ))
+}
+
+cna_pass2_clean <- merge_sample_metadata(cna_pass2_clean)
+
+readr::write_tsv(cna_pass2_clean, "cohort_cna_pass2.tsv", na = "NA")
+```
+
+```{r load-snv}
+# FILTER_SNV TSVs are staged under snv/ by the module's stageAs directive.
+snv_files <- list.files(path = "snv", pattern = "\\.snv\\.filtered\\.tsv$",
+                         full.names = TRUE)
+
+snv_long <- if (length(snv_files) > 0) {
+  map_dfr(snv_files, ~ read_tsv(.x, col_types = cols(.default = "c"),
+                                show_col_types = FALSE))
+} else {
+  tibble()
+}
+
+if (nrow(snv_long) > 0 && !"SAMPLE" %in% names(snv_long)) {
+  snv_long <- snv_long |> mutate(SAMPLE = "unknown")
+}
+
+# Coerce numerics needed by plots / filters
+if (nrow(snv_long) > 0) {
+  snv_long <- snv_long |>
+    mutate(
+      gnomADg_AF      = suppressWarnings(as.numeric(gnomADg_AF)),
+      CLAIRSTO_VAF    = suppressWarnings(as.numeric(CLAIRSTO_VAF)),
+      DEEPSOMATIC_VAF = suppressWarnings(as.numeric(DEEPSOMATIC_VAF))
+    )
+}
+```
+
+```{r snv-clean}
+#| eval: !expr nrow(snv_long) > 0
+
+# Candidate_genes: SYMBOL i∩ candidate gene panel
+if (length(candidate_set) > 0 && "SYMBOL" %in% names(snv_long)) {
+  snv_long <- snv_long |>
+    mutate(Candidate_genes = ifelse(SYMBOL %in% candidate_set, SYMBOL, ""))
+} else {
+  snv_long$Candidate_genes <- ""
+}
+
+# Split the CIVIC INFO field into named columns for downstream review. Skips
+# silently when the annotate_civic_snv step wasn't staged (no CIVIC column).
+# The seven CIViC_* columns land immediately after the raw CIVIC column so
+# reviewers can compare source and parsed values side-by-side.
+if ("CIVIC" %in% names(snv_long)) {
+  civic_parsed <- purrr::map(snv_long$CIVIC, parse_civic_field)
+  civic_tbl <- tibble::tibble(
+    CIViC_Consequence           = vapply(civic_parsed, `[[`, character(1), "CIViC_Consequence"),
+    CIViC_SYMBOL                = vapply(civic_parsed, `[[`, character(1), "CIViC_SYMBOL"),
+    CIViC_Variant_ID            = vapply(civic_parsed, `[[`, character(1), "CIViC_Variant_ID"),
+    CIViC_Variant_URL           = vapply(civic_parsed, `[[`, character(1), "CIViC_Variant_URL"),
+    CIViC_Entity_Variant_Origin = vapply(civic_parsed, `[[`, character(1), "CIViC_Entity_Variant_Origin"),
+    CIViC_Entity_Therapies      = vapply(civic_parsed, `[[`, character(1), "CIViC_Entity_Therapies"),
+    CIViC_Assertion_ACMG_Codes  = vapply(civic_parsed, `[[`, character(1), "CIViC_Assertion_ACMG_Codes")
+  )
+  snv_long <- dplyr::bind_cols(snv_long, civic_tbl)
+}
+
+# SNV driver-priority tier
+snv_tier_tbl <- assign_driver_tier_snv(
+  onc             = if ("ONC"             %in% names(snv_long)) snv_long$ONC             else rep(NA_character_, nrow(snv_long)),
+  clnsig          = if ("CLNSIG"          %in% names(snv_long)) snv_long$CLNSIG          else rep(NA_character_, nrow(snv_long)),
+  candidate_genes = snv_long$Candidate_genes,
+  clairsto_vaf    = if ("CLAIRSTO_VAF"    %in% names(snv_long)) snv_long$CLAIRSTO_VAF    else rep(NA_character_, nrow(snv_long)),
+  deepsomatic_vaf = if ("DEEPSOMATIC_VAF" %in% names(snv_long)) snv_long$DEEPSOMATIC_VAF else rep(NA_character_, nrow(snv_long))
+)
+snv_long <- bind_cols(snv_long, snv_tier_tbl)
+
+snv_long <- merge_sample_metadata(snv_long)
+
+# Emit cohort TSV (full schema, including columns not shown in DT). Optional
+# output of the SV_REPORT_INDEX module.
+readr::write_tsv(snv_long, "cohort_snv.tsv", na = "NA")
+```
+
+```{r disco-plot-prep}
+#| eval: !expr isTRUE(params$disco_enable)
+
+# ProteinPaint DISCO expects an `mlst` (mutation list) array with per-variant objects. Data-type (`dt`) codes: 1 = SNV point mutation, 2 = SV / fusion, 4 = CNV segment (log2 copy-number ratio as `value`).
+
+
+#  SNV mlst 
+disco_snv_class <- function(consequence) {
+  dplyr::case_when(
+    is.na(consequence) | !nzchar(consequence)                                             ~ "M",
+    grepl("stop_gained|stop_lost|start_lost|nonsense", consequence, ignore.case = TRUE)   ~ "N",
+    grepl("frameshift",                                consequence, ignore.case = TRUE)   ~ "F",
+    grepl("splice",                                    consequence, ignore.case = TRUE)   ~ "P",
+    grepl("inframe_deletion",                          consequence, ignore.case = TRUE)   ~ "D",
+    grepl("inframe_insertion",                         consequence, ignore.case = TRUE)   ~ "I",
+    grepl("missense",                                  consequence, ignore.case = TRUE)   ~ "M",
+    grepl("synonymous",                                consequence, ignore.case = TRUE)   ~ "S",
+    TRUE                                                                                  ~ "M"
+  )
+}
+
+mlst_snv <- if (exists("snv_long") && nrow(snv_long) > 0 &&
+                "driver_tier" %in% names(snv_long)) {
+  snv_long |>
+    dplyr::filter(driver_tier == 1L) |>
+    dplyr::transmute(
+      dt       = 1L,
+      chr      = if (all(startsWith(as.character(CHROM), "chr"))) as.character(CHROM)
+                 else paste0("chr", CHROM),
+      position = suppressWarnings(as.integer(POS)),
+      ref      = REF,
+      alt      = ALT,
+      gene     = dplyr::coalesce(SYMBOL, "intergenic"),
+      isoform  = dplyr::coalesce(Feature, "unknown"),
+      mname    = dplyr::coalesce(HGVSp, HGVSc, ""),
+      class    = disco_snv_class(Consequence),
+      sample   = if ("sample_id" %in% names(snv_long))
+                   dplyr::coalesce(sample_id, SAMPLE) else SAMPLE
+    ) |>
+    dplyr::filter(!is.na(position))
+} else tibble::tibble()
+
+#  CNA mlst 
+mlst_cna <- if (exists("cna_pass2_clean") && nrow(cna_pass2_clean) > 0 &&
+                "driver_tier" %in% names(cna_pass2_clean)) {
+  cna_pass2_clean |>
+    dplyr::filter(driver_tier == 1L) |>
+    dplyr::transmute(
+      dt     = 4L,
+      chr    = if (all(startsWith(as.character(CHROM), "chr"))) as.character(CHROM)
+               else paste0("chr", CHROM),
+      start  = suppressWarnings(as.integer(POS)),
+      stop   = suppressWarnings(as.integer(END)),
+      value  = suppressWarnings(as.numeric(TCN)),
+      # value = suppressWarnings(log2(pmax(as.numeric(TCN), 0.25) / 2))
+      sample = if ("sample_id" %in% names(cna_pass2_clean))
+                 dplyr::coalesce(sample_id, SAMPLE) else SAMPLE
+    ) |>
+    dplyr::filter(!is.na(start), !is.na(stop), !is.na(value))
+} else tibble::tibble()
+
+#  SV BND mlst
+# Partner chr + pos parsed from ALT bracket notation via `parse_bnd_partner()`.
+# `geneA` / `geneB` (record-side and partner-side gene) come from the bp_split
+# EnsDb annotation earlier in the pipeline: `gene_name_left` is the anchor at
+# CHROM:POS and `gene_name_right` is the partner anchor. Fall back to
+# AnnotSV/VEP-derived `Gene_name` / `Closest_left` for `geneA` and "unknown"
+# for `geneB` when the EnsDb block didn't run (e.g. rocker/verse image without
+# ensembldb + plyranges).
+mlst_bnd <- if (exists("pass2_clean") && nrow(pass2_clean) > 0 &&
+                "driver_tier" %in% names(pass2_clean)) {
+  bnd_t1 <- pass2_clean |>
+    dplyr::filter(driver_tier == 1L, SVTYPE == "BND")
+  if (nrow(bnd_t1) > 0) {
+    partners  <- lapply(bnd_t1$ALT, parse_bnd_partner)
+    prefix_chr <- function(c) ifelse(is.na(c) | !nzchar(c) | startsWith(c, "chr"),
+                                     c, paste0("chr", c))
+    gene_left  <- if ("gene_name_left"  %in% names(bnd_t1)) bnd_t1$gene_name_left
+                  else rep(NA_character_, nrow(bnd_t1))
+    gene_right <- if ("gene_name_right" %in% names(bnd_t1)) bnd_t1$gene_name_right
+                  else rep(NA_character_, nrow(bnd_t1))
+    sample_lbl <- if ("sample_id" %in% names(bnd_t1))
+                    dplyr::coalesce(bnd_t1$sample_id, bnd_t1$SAMPLE)
+                  else bnd_t1$SAMPLE
+    dplyr::tibble(
+      dt      = 2L,
+      chrA    = prefix_chr(as.character(bnd_t1$CHROM)),
+      posA    = suppressWarnings(as.integer(bnd_t1$POS)),
+      geneA   = dplyr::coalesce(gene_left, bnd_t1$Gene_name,
+                                bnd_t1$Closest_left, "intergenic"),
+      # parse_bnd_partner strips the "chr" prefix via normalize_chrom() —
+      # re-prepend it here since DISCO expects "chrN" format.
+      chrB    = prefix_chr(vapply(partners, function(p) as.character(p$chrom),
+                                  character(1))),
+      posB    = vapply(partners, function(p) suppressWarnings(as.integer(p$pos)),
+                       integer(1)),
+      geneB   = dplyr::coalesce(gene_right, "unknown"),
+      strandA = "+",
+      strandB = "-",
+      sample  = sample_lbl
+    ) |>
+      dplyr::filter(!is.na(posA), !is.na(chrB), !is.na(posB))
+  } else tibble::tibble()
+} else tibble::tibble()
+
+# Combine as a single mlst list — but transpose EACH subset first so per-
+# record named lists only carry that dt's own fields. bind_rows() would
+# NA-pad missing columns (SNV records would get chrA/posA/geneA=NA, CNA
+# records would get chr/position/gene=NA, etc.) and jsonlite serializes
+# those as literal `null` which ProteinPaint DISCO rejects as malformed
+# records. Per-subset transpose keeps each dt's payload minimal.
+df_to_records <- function(df) {
+  if (nrow(df) == 0) return(list())
+  purrr::transpose(df)
+}
+mlst_all_list <- c(
+  df_to_records(mlst_snv),
+  df_to_records(mlst_cna),
+  df_to_records(mlst_bnd)
+)
+
+# Keep `mlst_all` as a tibble for the status-count chunk below (`sum(dt==1)`
+# etc.); the JSON step uses `mlst_all_list` for the record-level output.
+mlst_all <- dplyr::bind_rows(mlst_snv, mlst_cna, mlst_bnd)
+```
+
+```{r disco-plot-data, include = FALSE}
+#| eval: !expr isTRUE(params$disco_enable) && exists("mlst_all") && nrow(mlst_all) > 0
+
+# DATA-ONLY chunk. This chunk produces no rendered output; it exposes a
+# handful of variables (disco_mlst_json, safe_cohort_label, pp_host,
+# pp_genome, n_cohort_snv/cna/bnd, n_cohort_samples) that the pure-markdown
+# runproteinpaint block below then consumes via knitr inline `r ...`
+# expressions. Separating data from presentation this way keeps the
+# runproteinpaint template inspectable as real HTML/JS with syntax
+# highlighting instead of a sprintf-embedded string blob.
+#
+# Layout produced by this chunk + the markdown below:
+#   * ONE cohort DISCO plot rendered inline in the report body (single
+#     `<div id="disco_pp_cohort">` mount + runproteinpaint call). Contains
+#     the union of Tier-1 records across every sample.
+#   * Per-sample DISCO HTMLs written to `protein_paint_out/` (still
+#     managed by this chunk via build_disco_html + writeLines) for
+#     sample-scoped inspection outside the main report.
+# No top-level `disco_plot.html` file is written any more — the report
+# itself IS the cohort plot.
+
+pp_host   <- if (!is.null(params$proteinpaint_host)   && nzchar(params$proteinpaint_host))   params$proteinpaint_host   else "http://localhost:3456"
+pp_genome <- if (!is.null(params$proteinpaint_genome) && nzchar(params$proteinpaint_genome)) params$proteinpaint_genome else "hg38"
+
+# Sanitize label for safe use as a filename component: letters, digits,
+# dot, underscore, hyphen — anything else becomes underscore.
+disco_sample_slug <- function(s) {
+  s <- as.character(s)
+  s[is.na(s) | !nzchar(s)] <- "unknown"
+  gsub("[^A-Za-z0-9._-]+", "_", s)
+}
+
+# Build the full standalone HTML document for a per-sample DISCO plot.
+# Only used for the per-sample files under protein_paint_out/. The cohort
+# plot is rendered inline in this document; nothing here is emitted for it.
+build_disco_html <- function(mlst_records, ring_label) {
+  mlst_records <- lapply(mlst_records, function(rec) rec[names(rec) != "sample"])
+  mlst_json <- jsonlite::toJSON(mlst_records, auto_unbox = TRUE, na = "null")
+  safe_label <- gsub('"', '\\"', gsub("\\\\", "\\\\\\\\", as.character(ring_label)), fixed = TRUE)
+  sprintf('<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DISCO plot — %s</title>
+  <style>
+    body { margin: 0; padding: 12px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #ffffff; }
+    #disco_pp_holder { min-height: 700px; width: 100%%; }
+  </style>
+  <script src="https://proteinpaint.stjude.org/bin/proteinpaint.js" charset="utf-8"></script>
+</head>
+<body>
+  <div id="disco_pp_holder"></div>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      if (typeof runproteinpaint !== "function") {
+        document.getElementById("disco_pp_holder").innerHTML =
+          "<em>ProteinPaint JS bundle failed to load. Verify network access to proteinpaint.stjude.org or host a local mirror.</em>";
+        return;
+      }
+      runproteinpaint({
+        host: "%s",
+        holder: document.getElementById("disco_pp_holder"),
+        noheader: true,
+        nobox: true,
+        genome: "%s",
+        disco: {
+          mlst: %s,
+          settings: { Disco: { centerText: "%s" } }
+        }
+      });
+    });
+  </script>
+</body>
+</html>
+', safe_label, pp_host, pp_genome, mlst_json, safe_label)
+}
+
+# Partition records by sample for per-sample HTMLs.
+sample_of <- function(rec) {
+  v <- rec[["sample"]]
+  if (is.null(v) || is.na(v) || !nzchar(as.character(v))) "unknown" else as.character(v)
+}
+per_sample_labels  <- vapply(mlst_all_list, sample_of, character(1))
+per_sample_split   <- split(mlst_all_list, per_sample_labels)
+sample_ids         <- names(per_sample_split)
+sample_slugs       <- disco_sample_slug(sample_ids)
+n_cohort_samples   <- length(sample_ids)
+
+# Braces required: R's parser closes the outer `if (…) expr` before it
+# reaches the naked `else` on the next line, so the chained form must
+# be `if {…} else if {…} else {…}` when broken across lines.
+cohort_label <- if (n_cohort_samples > 1) {
+  sprintf("Cohort (n = %d)", n_cohort_samples)
+} else if (n_cohort_samples == 1) {
+  sample_ids[1]
+} else {
+  "Cohort"
+}
+
+# Per-sample DISCO HTMLs → protein_paint_out/.
+dir.create("protein_paint_out", showWarnings = FALSE, recursive = TRUE)
+sample_files <- file.path("protein_paint_out",
+                          paste0("disco_plot_", sample_slugs, ".html"))
+for (i in seq_along(sample_ids)) {
+  writeLines(
+    build_disco_html(per_sample_split[[i]], sample_ids[i]),
+    sample_files[i]
+  )
+}
+
+# ── Values consumed by the pure-markdown runproteinpaint block below via
+# inline `r ...` expressions. Every hand-off is a single scalar / atomic
+# string so knitr's inline substitution rules apply cleanly (multi-line
+# HTML is emitted as pure markdown text, not through this data chunk).
+n_cohort_snv <- sum(mlst_all$dt == 1, na.rm = TRUE)
+n_cohort_cna <- sum(mlst_all$dt == 4, na.rm = TRUE)
+n_cohort_bnd <- sum(mlst_all$dt == 2, na.rm = TRUE)
+
+# Drop the per-record `sample` field before serializing — DISCO's adhoc
+# launcher ignores unknown keys but stripping keeps the embedded JSON minimal.
+disco_mlst_prep <- lapply(mlst_all_list, function(rec) rec[names(rec) != "sample"])
+disco_mlst_json <- jsonlite::toJSON(disco_mlst_prep, auto_unbox = TRUE, na = "null")
+
+# Escape backslash + double-quote so the label is safe inside a JS string literal.
+safe_cohort_label <- gsub('"', '\\"',
+                          gsub("\\\\", "\\\\\\\\", as.character(cohort_label)),
+                          fixed = TRUE)
+```
+
+```{r lollipop-plot-data, include = FALSE}
+#| eval: !expr isTRUE(params$disco_enable) && exists("snv_long") && nrow(snv_long) > 0 && "driver_tier" %in% names(snv_long)
+
+# Filter to Tier-1 SNVs with a resolvable gene SYMBOL that can project onto
+# a coding-region protein. See earlier lollipop-plot-embed comment for the
+# rationale on is_protein_projectable (CSDE1 vs NRAS at chr1:114716126 case).
+tier1_snv <- dplyr::filter(snv_long, driver_tier == 1L)
+pp_host   <- if (!is.null(params$proteinpaint_host)   && nzchar(params$proteinpaint_host))   params$proteinpaint_host   else "http://localhost:3456"
+pp_genome <- if (!is.null(params$proteinpaint_genome) && nzchar(params$proteinpaint_genome)) params$proteinpaint_genome else "hg38"
+
+snv_class_from_consequence <- if (exists("disco_snv_class")) {
+  disco_snv_class
+} else {
+  function(c) "M"
+}
+
+is_protein_projectable <- function(hgvsp, consequence) {
+  hgvsp_ok <- !is.na(hgvsp) & nzchar(hgvsp)
+  cons_ok  <- !is.na(consequence) & nzchar(consequence) &
+              grepl(paste0("missense|stop_gained|stop_lost|start_lost|",
+                           "frameshift|inframe_|splice_(acceptor|donor|region)|",
+                           "protein_altering|synonymous|nonsense"),
+                    consequence, ignore.case = TRUE)
+  hgvsp_ok | cons_ok
+}
+
+lollipop_variants <- if (nrow(tier1_snv) == 0) tibble::tibble() else {
+  n_r         <- nrow(tier1_snv)
+  sample_col  <- if ("sample_id" %in% names(tier1_snv)) "sample_id" else "SAMPLE"
+  sample_vals <- as.character(tier1_snv[[sample_col]])
+  sample_vals <- ifelse(is.na(sample_vals) | !nzchar(sample_vals), "unknown", sample_vals)
+  clnsig_vals <- if ("CLNSIG" %in% names(tier1_snv)) as.character(tier1_snv$CLNSIG) else rep(NA_character_, n_r)
+  onc_vals    <- if ("ONC"    %in% names(tier1_snv)) as.character(tier1_snv$ONC)    else rep(NA_character_, n_r)
+  clnsig_vals[!nzchar(clnsig_vals) | clnsig_vals == "."] <- NA_character_
+  onc_vals   [!nzchar(onc_vals)    | onc_vals    == "."] <- NA_character_
+  pathogenicity_vals <- dplyr::coalesce(clnsig_vals, onc_vals, "")
+  c_vaf <- if ("CLAIRSTO_VAF"    %in% names(tier1_snv)) suppressWarnings(as.numeric(tier1_snv$CLAIRSTO_VAF)) else rep(NA_real_, n_r)
+  d_vaf <- if ("DEEPSOMATIC_VAF" %in% names(tier1_snv)) suppressWarnings(as.numeric(tier1_snv$DEEPSOMATIC_VAF)) else rep(NA_real_, n_r)
+  vaf_max <- pmax(c_vaf, d_vaf, na.rm = FALSE)
+  vaf_max <- ifelse(is.na(vaf_max), dplyr::coalesce(c_vaf, d_vaf), vaf_max)
+  vaf_vals <- ifelse(is.na(vaf_max), "", sprintf("%.3f", vaf_max))
+  consequence_vals <- if ("Consequence" %in% names(tier1_snv)) as.character(tier1_snv$Consequence) else rep("", n_r)
+  hgvsp_col <- if ("HGVSp" %in% names(tier1_snv)) as.character(tier1_snv$HGVSp) else rep(NA_character_, n_r)
+
+  tier1_snv |>
+    dplyr::transmute(
+      gene_symbol = dplyr::coalesce(SYMBOL, NA_character_),
+      chr    = if (all(startsWith(as.character(CHROM), "chr"))) as.character(CHROM)
+               else paste0("chr", CHROM),
+      pos    = suppressWarnings(as.integer(POS)),
+      mname  = dplyr::coalesce(HGVSp, HGVSc, ""),
+      class  = snv_class_from_consequence(Consequence),
+      dt     = 1L,
+      ref    = REF, alt = ALT, sample = sample_vals,
+      Consequence   = consequence_vals,
+      Pathogenicity = pathogenicity_vals,
+      VAF           = vaf_vals,
+      .hgvsp_raw    = hgvsp_col
+    ) |>
+    dplyr::filter(!is.na(pos), !is.na(gene_symbol), nzchar(gene_symbol),
+                  is_protein_projectable(.hgvsp_raw, Consequence)) |>
+    dplyr::select(-.hgvsp_raw)
+}
+
+build_lollipop_variants_json <- function(variants_df) {
+  info_cols <- intersect(c("Consequence", "Pathogenicity", "VAF"), names(variants_df))
+  top_cols  <- setdiff(names(variants_df), c("gene_symbol", info_cols))
+  is_empty_scalar <- function(v) {
+    if (is.null(v)) return(TRUE)
+    if (length(v) != 1) return(FALSE)
+    if (is.na(v)) return(TRUE)
+    if (is.character(v) && !nzchar(v)) return(TRUE)
+    FALSE
+  }
+  vars <- lapply(seq_len(nrow(variants_df)), function(i) {
+    top_part  <- as.list(variants_df[i, top_cols,  drop = FALSE])
+    info_part <- as.list(variants_df[i, info_cols, drop = FALSE])
+    info_part <- info_part[!vapply(info_part, is_empty_scalar, logical(1))]
+    if (length(info_part) > 0) top_part$info <- info_part
+    top_part
+  })
+  jsonlite::toJSON(vars, auto_unbox = TRUE, na = "null")
+}
+
+build_lollipop_html <- function(gene, variants_df) {
+  vars_json <- build_lollipop_variants_json(variants_df)
+  safe_gene <- gsub('"', '\\"', gene, fixed = TRUE)
+  sprintf('<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lollipop &mdash; %s (Tier-1 SNVs)</title>
+  <style>
+    body { margin: 0; padding: 12px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #ffffff; }
+    #lollipop_pp_holder { min-height: 500px; width: 100%%; }
+  </style>
+  <script src="https://proteinpaint.stjude.org/bin/proteinpaint.js" charset="utf-8"></script>
+</head>
+<body>
+  <div id="lollipop_pp_holder"></div>
+  <script>
+    document.addEventListener("DOMContentLoaded", function () {
+      if (typeof runproteinpaint !== "function") {
+        document.getElementById("lollipop_pp_holder").innerHTML =
+          "<em>ProteinPaint JS bundle failed to load. Verify network access to proteinpaint.stjude.org or host a local mirror.</em>";
+        return;
+      }
+      runproteinpaint({
+        host: "%s",
+        holder: document.getElementById("lollipop_pp_holder"),
+        parseurl: true, noheader: true, nobox: true,
+        genome: "%s",
+        gene: "%s",
+        tracks: [ { type: "mds3", name: "Tier-1 SNVs %s", custom_variants: %s } ]
+      });
+    });
+  </script>
+</body>
+</html>
+', safe_gene, pp_host, pp_genome, safe_gene, safe_gene, vars_json)
+}
+
+# Sanitize label for filename
+if (!exists("disco_sample_slug")) {
+  disco_sample_slug <- function(s) {
+    s <- as.character(s)
+    s[is.na(s) | !nzchar(s)] <- "unknown"
+    gsub("[^A-Za-z0-9._-]+", "_", s)
+  }
+}
+
+lollipop_link_display <- if (nrow(lollipop_variants) == 0) tibble::tibble() else {
+  dir.create("protein_paint_out", showWarnings = FALSE, recursive = TRUE)
+  gene_counts <- lollipop_variants |>
+    dplyr::group_by(gene_symbol) |>
+    dplyr::summarise(
+      n_snv       = dplyr::n(),
+      top_variant = {
+        vaf_num <- suppressWarnings(as.numeric(VAF))
+        mname[order(-vaf_num, na.last = TRUE)][1]
+      },
+      .groups = "drop"
+    ) |>
+    dplyr::arrange(desc(n_snv), gene_symbol)
+
+  lollipop_files <- character(nrow(gene_counts))
+  for (i in seq_len(nrow(gene_counts))) {
+    g   <- gene_counts$gene_symbol[i]
+    vg  <- dplyr::filter(lollipop_variants, gene_symbol == g)
+    out <- file.path("protein_paint_out",
+                     sprintf("lollipop_%s.html", disco_sample_slug(g)))
+    writeLines(build_lollipop_html(g, vg), out)
+    lollipop_files[i] <- out
+  }
+  tibble::tibble(
+    Gene         = sprintf('<a href="%s" target="_blank" rel="noopener">%s</a>',
+                           lollipop_files, gene_counts$gene_symbol),
+    `# Tier-1`   = gene_counts$n_snv,
+    `Top variant` = ifelse(is.na(gene_counts$top_variant) | !nzchar(gene_counts$top_variant),
+                          "&mdash;", gene_counts$top_variant),
+    Open         = sprintf('<a href="%s" target="_blank" rel="noopener">&#128279;</a>',
+                          lollipop_files)
+  )
+}
+```
+
+
+
+
+
+# Overview
+
+## Row {height="120px"}
+
+```{r vb-samples}
+#| content: valuebox
+#| title: "Samples"
+list(icon = "people", color = "primary",
+     value = vb_count("stats_df", function(df) rep(TRUE, nrow(df))))
+```
+
+```{r vb-t1-sv}
+#| content: valuebox
+#| title: "Tier-1 SVs"
+list(icon = "diagram-3", color = "success",
+     value = vb_count("pass2_clean", function(df) df$driver_tier == 1L))
+```
+
+```{r vb-t1-cna}
+#| content: valuebox
+#| title: "Tier-1 CNAs"
+list(icon = "bar-chart", color = "warning",
+     value = vb_count("cna_pass2_clean", function(df) df$driver_tier == 1L))
+```
+
+```{r vb-t1-snv}
+#| content: valuebox
+#| title: "Tier-1 SNVs"
+list(icon = "bullseye", color = "info",
+     value = vb_count("snv_long", function(df) df$driver_tier == 1L))
+```
+
+```{r vb-total-pass2}
+#| content: valuebox
+#| title: "Total pass2"
+list(icon = "clipboard-data", color = "secondary",
+     value = vb_count("pass2_clean", function(df) rep(TRUE, nrow(df))) +
+             vb_count("cna_pass2_clean", function(df) rep(TRUE, nrow(df))) +
+             vb_count("snv_long", function(df) rep(TRUE, nrow(df))))
+```
+
+## Row {.fill}
+
+### Cohort DISCO plot {title="Cohort DISCO plot"}
+
+::: {#disco_pp_cohort style="min-height:700px; width:100%;"}
+:::
+
+<script src="https://proteinpaint.stjude.org/bin/proteinpaint.js" charset="utf-8"></script>
+<script>
+runproteinpaint({
+  host: "`r pp_host`",
+  holder: document.getElementById("disco_pp_cohort"),
+  noheader: true,
+  nobox: true,
+  genome: "`r pp_genome`",
+  disco: {
+    mlst: `r disco_mlst_json`,
+    settings: { Disco: { centerText: "`r safe_cohort_label`" } }
+  }
+});
+</script>
+
+::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
+Cohort DISCO plot &mdash; `r n_cohort_snv` SNV / `r n_cohort_cna` CNA / `r n_cohort_bnd` BND across `r n_cohort_samples` sample(s). Backend: `` `r pp_host` ``.
+:::
+
+
+
+```{r disco-plot-sample-statement, results = "asis", echo = FALSE}
+#| eval: !expr isTRUE(params$disco_enable) && exists("sample_ids") && length(sample_ids) > 0
+
+# ── Per-sample DISCO HTMLs are written to protein_paint_out/ by the data
+# chunk above. The report body no longer renders per-sample link cards
+# (they became cluttered on larger cohorts); this asis chunk emits one
+# short statement pointing reviewers at the output directory instead.
+# Kept as an asis chunk (not inline r) because the sample count is one
+# among several substitutions in a formatted <p> block — a single inline
+# `r sample_count` in prose reads less clearly than a scoped cat().
+cat(sprintf(
+'<p style="margin:14px 0 4px 0; font-size:0.92em; color:#444;">
+  Per-sample DISCO HTMLs (%d file(s)) are written to
+  <code style="background:#f2f2f2; padding:1px 6px; border-radius:3px;">%s/</code>
+  under <code style="background:#f2f2f2; padding:1px 6px; border-radius:3px;">results/sv_report/</code>.
+  Open the individual files directly to inspect a single sample.
+</p>
+', length(sample_ids), "protein_paint_out"))
+```
+
+
+## Row {.fill}
+
+### SV Protein Paint {title="SV Protein Paint (gene fusion)"}
+
+```{r sv-proteinpaint-build}
+#| echo: false
+#| warning: false
+
+# ── ProteinPaint svfusion export ────────────────────────────────────────────
+# Renders Tier 1 + Tier 2 SVs as a two-breakpoint fusion table for the
+# ProteinPaint gene-fusion app (https://proteinpaint.stjude.org/?appcard=genefusion,
+# or the FusionEditor at /FusionEditor/). Format spec:
+# https://docs.stjude.cloud/visualization-community/proteinpaint/sv-and-fusion-transcript
+#
+# THREE THINGS THE SPEC REQUIRES THAT THE PASS2 TABLE DOES NOT ALREADY SATISFY:
+#   1. positions are 0-BASED   -> POS - 1 (VCF POS is 1-based)
+#   2. chromosomes need "chr"  -> raw CHROM is bare ("21")
+#   3. one row per EVENT       -> an interchromosomal BND is TWO VCF records
+#                                 (both breakends); emitting both duplicates it
+#
+# 5'/3' ASSIGNMENT comes from the ALT bracket orientation, NOT from POS order.
+# VCF 4.2 breakend forms:  t[p[ and t]p]  -> THIS record is 5'
+#                          ]p]t and [p[t  -> the PARTNER is 5'
+# i.e. an ALT beginning with the ref base means this side is 5'. Both mates of a
+# pair independently agree on the assignment, so dedup may keep either one.
+#
+# INS is excluded: END == POS gives no second breakpoint, and ProteinPaint's
+# model is two joined breakpoints. (The spec's "inserted segment" is a different
+# concept — sequence between two breakpoints in an RNA-seq fusion.)
+pp_sv_fusion      <- NULL
+pp_sv_note        <- NULL
+pp_sv_input_json  <- "null"   # JS-safe string of the whole svfusion file
+
+.need <- c("SAMPLE", "CHROM", "POS", "END", "ALT", "SVTYPE", "driver_tier")
+if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
+    nrow(pass2_clean) > 0 && all(.need %in% names(pass2_clean))) {
+
+  .pfx <- function(x) ifelse(is.na(x) | !nzchar(x) | startsWith(x, "chr"),
+                             x, paste0("chr", x))
+  # gene / isoform / strand per side come from the EnsDb join above. They are
+  # absent when params$ensembl_db is unset — fall back to blanks, which the
+  # spec permits (renders an intergenic box rather than a protein).
+  .col <- function(nm) if (nm %in% names(pass2_clean)) as.character(pass2_clean[[nm]]) else NA_character_
+
+  .d <- tibble::tibble(
+    SAMPLE = as.character(pass2_clean$SAMPLE),
+    CHROM  = as.character(pass2_clean$CHROM),
+    POS    = suppressWarnings(as.numeric(pass2_clean$POS)),
+    END    = suppressWarnings(as.numeric(pass2_clean$END)),
+    ALT    = as.character(pass2_clean$ALT),
+    SVTYPE = as.character(pass2_clean$SVTYPE),
+    tier   = suppressWarnings(as.integer(pass2_clean$driver_tier)),
+    g_l    = .col("gene_name_left"),            g_r = .col("gene_name_right"),
+    t_l    = .col("canonical_transcript_left"), t_r = .col("canonical_transcript_right"),
+    s_l    = .col("gene_strand_left"),          s_r = .col("gene_strand_right"),
+    DV     = .col("DV")
+  ) |>
+    dplyr::filter(!is.na(tier), tier %in% c(1L, 2L)) |>
+    dplyr::filter(SVTYPE != "INS")
+
+  if (nrow(.d) > 0) {
+    .m     <- stringr::str_match(.d$ALT, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
+    .isbnd <- .d$SVTYPE == "BND" | grepl("[\\[\\]]", .d$ALT)
+    .ok    <- !is.na(.m[, 2])
+    .five  <- grepl("^[ACGTNacgtn]", .d$ALT)      # this record is the 5' side
+
+    .d <- .d |>
+      dplyr::mutate(
+        .bnd = .isbnd & .ok,
+        chr_a = .pfx(ifelse(.bnd & !.five, .m[, 2], CHROM)),
+        pos_a = ifelse(.bnd & !.five, suppressWarnings(as.numeric(.m[, 3])), POS),
+        gen_a = ifelse(.bnd & !.five, g_r, g_l),
+        iso_a = ifelse(.bnd & !.five, t_r, t_l),
+        str_a = ifelse(.bnd & !.five, s_r, s_l),
+        chr_b = .pfx(ifelse(.bnd, ifelse(.five, .m[, 2], CHROM), CHROM)),
+        pos_b = ifelse(.bnd, ifelse(.five, suppressWarnings(as.numeric(.m[, 3])), POS), END),
+        gen_b = ifelse(.bnd & !.five, g_l, g_r),
+        iso_b = ifelse(.bnd & !.five, t_l, t_r),
+        str_b = ifelse(.bnd & !.five, s_l, s_r)
+      ) |>
+      # drop non-BND records that have no usable second breakpoint
+      dplyr::filter(!is.na(pos_a), !is.na(pos_b), pos_a != pos_b | .bnd) |>
+      # one row per event: collapse the two breakends of a BND pair
+      dplyr::mutate(.key = paste(SAMPLE,
+                                 pmin(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)),
+                                 pmax(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)))) |>
+      dplyr::distinct(.key, .keep_all = TRUE)
+
+    pp_sv_fusion <- .d |>
+      dplyr::transmute(
+        gene_a = dplyr::coalesce(gen_a, ""), isoform_a = dplyr::coalesce(iso_a, ""),
+        chr_a, position_a = as.integer(pos_a - 1), strand_a = dplyr::coalesce(str_a, "+"),
+        gene_b = dplyr::coalesce(gen_b, ""), isoform_b = dplyr::coalesce(iso_b, ""),
+        chr_b, position_b = as.integer(pos_b - 1), strand_b = dplyr::coalesce(str_b, "+"),
+        Sample = SAMPLE, Sampletype = "diagnosis",
+        SVTYPE, driver_tier = tier, Discordant_readcount = dplyr::coalesce(DV, "")
+      ) |>
+      dplyr::arrange(Sample, chr_a, position_a)
+
+    dir.create("protein_paint_out", showWarnings = FALSE, recursive = TRUE)
+    # Fixed descriptive name, matching the disco_plot_*/lollipop_* convention
+    # used elsewhere in protein_paint_out/ (no PREFIX variable exists here).
+    .out <- file.path("protein_paint_out", "sv_tier1_2.svfusion.txt")
+    readr::write_tsv(pp_sv_fusion, .out, na = "")
+    # fusioneditor expects `input` = the ENTIRE file as one string, "\n" line
+    # breaks, tab-separated, header first. toJSON(auto_unbox) emits a correctly
+    # escaped JS string literal.
+    pp_sv_input_json <- as.character(jsonlite::toJSON(
+      paste(readLines(.out, warn = FALSE), collapse = "\n"), auto_unbox = TRUE))
+    pp_sv_note <- sprintf("%d event(s) across %d sample(s) &rarr; <code>%s</code>",
+                          nrow(pp_sv_fusion),
+                          dplyr::n_distinct(pp_sv_fusion$Sample), .out)
+  } else {
+    pp_sv_note <- "No Tier 1/2 SVs with two breakpoints."
+  }
+} else {
+  pp_sv_note <- "pass2_clean unavailable or missing required columns."
+}
+```
+
+```{r sv-proteinpaint-table}
+#| echo: false
+if (!is.null(pp_sv_fusion) && nrow(pp_sv_fusion) > 0) {
+  DT::datatable(
+    pp_sv_fusion,
+    rownames   = FALSE,
+    extensions = c("Buttons", "Scroller"),
+    options = list(
+      dom = "Bfrtip", buttons = list("copy", list(extend = "csv", text = "Download svfusion")),
+      scrollY = 360, scroller = TRUE, scrollX = TRUE, pageLength = 25
+    ),
+    caption = htmltools::tags$caption(
+      style = "caption-side: top; text-align: left; font-size:0.9em;",
+      htmltools::HTML(paste0(
+        "ProteinPaint <b>svfusion</b> input &mdash; Tier 1 + Tier 2, one row per event. ",
+        "Positions are <b>0-based</b> per the format spec. ",
+        "Load at <code>https://proteinpaint.stjude.org/FusionEditor/</code> ",
+        "or the <code>?appcard=genefusion</code> card."))))
+} else {
+  htmltools::HTML(paste0("<p style='color:#666;'>", pp_sv_note, "</p>"))
+}
+```
+
+::: {#sv_fusion_pp style="min-height:520px; width:100%; margin-top:10px;"}
+:::
+
+<script src="https://proteinpaint.stjude.org/bin/proteinpaint.js" charset="utf-8"></script>
+<script>
+// Fusion Editor embed. Key names are case-sensitive; `input` (NOT `text`) is the
+// documented parameter and takes the entire file content as one string.
+// Ref: Embedding.md "Fusion editor" / fusioneditor:{}
+//      live example https://proteinpaint.stjude.org/examples/fusioneditor.html
+(function () {
+  var ppInput = `r pp_sv_input_json`;
+  if (!ppInput) return;                       // no Tier 1/2 events -> render nothing
+  runproteinpaint({
+    host: "`r pp_host`",
+    holder: document.getElementById("sv_fusion_pp"),
+    noheader: true,
+    nobox: true,
+    genome: "`r pp_genome`",
+    fusioneditor: {
+      input: ppInput,
+      dataname: "`r safe_cohort_label` Tier 1/2 SVs"
+    }
+  });
+})();
+</script>
+
+::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
+SV Protein Paint &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
+Genome build `r pp_genome`. BND mate pairs are collapsed to one event; INS is excluded
+(no second breakpoint).
+:::
+
+## Row {.fill}
+
+### Cohort recurrent SVs {title="Cohort recurrent SVs (Jasmine merge)"}
+
+```{r cohort-merge-load}
+#| echo: false
+#| warning: false
+
+# ── COHORT_MERGE_SV results ─────────────────────────────────────────────────
+# Populated only on PASS 2 of the two-pass render (see the header of
+# modules/local/sv_report_index/main.nf). On pass 1 params$cohort_recurrent_tsv
+# is "" and this section renders an explanatory card: pass 1's report is
+# superseded by pass 2 whenever the merge runs, so an empty card there is
+# expected, not a failure.
+#
+# The recurrence table is LONG -- one row per (cluster x sample). Two counts
+# carry the interpretation (see modules/local/jasmine_cluster_map/main.nf):
+#   n_tiered = samples where this SV was a Tier 1/2/3 call
+#   n_any    = samples with ANY evidence in the cluster (Jasmine INFO/SUPP)
+# n_tiered=1, n_any>=2 -> RESCUE candidate: called confidently in one sample and
+#                         filtered out elsewhere despite supporting evidence.
+# n_tiered=1, n_any=1  -> no corroboration; private call or false positive.
+jm_recur    <- NULL
+jm_note     <- NULL
+jm_summary  <- NULL
+jm_hdr_note <- NULL
+
+# bgzf is gzip-readable, so the header can be pulled without an htslib dependency.
+# Reads line-by-line and stops at the first non-"##" line rather than slurping a
+# potentially large VCF body.
+.read_vcf_header <- function(path, cap = 20000L) {
+  con <- gzfile(path, "rt")
+  on.exit(try(close(con), silent = TRUE), add = TRUE)
+  out <- character(0)
+  repeat {
+    l <- readLines(con, n = 1L, warn = FALSE)
+    if (length(l) == 0L || !startsWith(l, "##")) break
+    out <- c(out, l)
+    if (length(out) >= cap) break
+  }
+  out
+}
+
+.crt <- params$cohort_recurrent_tsv
+if (is.character(.crt) && length(.crt) == 1L && nzchar(.crt) && file.exists(.crt)) {
+  .tbl <- try(suppressWarnings(readr::read_tsv(
+    .crt, show_col_types = FALSE, progress = FALSE)), silent = TRUE)
+  if (inherits(.tbl, "try-error")) {
+    jm_note <- sprintf("Could not read <code>%s</code>.", basename(.crt))
+  } else if (nrow(.tbl) == 0) {
+    jm_note <- paste0(
+      "COHORT_MERGE_SV ran, but no cluster reached the recurrence threshold ",
+      "(<code>cohort_sv_min_recurrence</code>). Expected on a two-sample test set.")
+  } else {
+    jm_recur <- .tbl
+  }
+} else {
+  jm_note <- paste0(
+    "Cohort SV merge results are not part of this render. Either this is ",
+    "<b>pass 1</b> of the two-pass render &mdash; it produces the tiered table ",
+    "that COHORT_MERGE_SV consumes, and pass 2 re-renders this page with the ",
+    "merge results &mdash; or <code>run_cohort_merge_sv</code> is false.")
+}
+
+if (!is.null(jm_recur)) {
+  .cols <- names(jm_recur)
+  if (all(c("cluster_id", "n_tiered", "n_any") %in% .cols)) {
+    jm_summary <- jm_recur |>
+      dplyr::distinct(cluster_id, .keep_all = TRUE) |>
+      dplyr::mutate(.nt = suppressWarnings(as.integer(n_tiered)),
+                    .na = suppressWarnings(as.integer(n_any))) |>
+      dplyr::summarise(
+        clusters              = dplyr::n(),
+        `n_any >= 2`          = sum(.na >= 2, na.rm = TRUE),
+        `n_tiered >= 2`       = sum(.nt >= 2, na.rm = TRUE),
+        `rescue candidates`   = sum(.nt == 1 & .na >= 2, na.rm = TRUE))
+    # Most-corroborated clusters first -- the rows a reviewer looks at.
+    .ord <- intersect(c("cluster_id", "sample"), .cols)
+    jm_recur <- jm_recur |>
+      dplyr::arrange(dplyr::desc(suppressWarnings(as.integer(n_any))),
+                     dplyr::across(dplyr::all_of(.ord)))
+  }
+}
+
+.cmv <- params$cohort_merged_vcf
+if (is.character(.cmv) && length(.cmv) == 1L && nzchar(.cmv) && file.exists(.cmv)) {
+  .hdr <- try(.read_vcf_header(.cmv), silent = TRUE)
+  if (!inherits(.hdr, "try-error") && length(.hdr) > 0) {
+    # Jasmine copies the header of its FIRST input, which here is a fully
+    # VEP/AnnotSV-annotated per-sample VCF, so the upstream INFO definitions are
+    # expected to survive the merge. Stated as a CHECK, not an assumption: the
+    # card below reports which tags the merged file actually declares. Note that
+    # a declared INFO tag is not the same as a populated one -- Jasmine emits one
+    # representative record per cluster, so member-level annotations are taken
+    # from the per-sample record table by JASMINE_CLUSTER_MAP, not from here.
+    # NOT "CSQ": SPLIT_VEP_TO_INFO expands it into individual INFO fields
+    # upstream, so CSQ is already absent from Jasmine's INPUT.
+    .want <- c("Gene_name", "gnomAD_SV_AF", "ClinVar_SV_CLNSIG", "CALLER",
+               "AnnotSV_ID", "ACMG_class", "AnnotSV_ranking_score",
+               "SUPP_VEC", "SUPP", "IDLIST", "STARTVARIANCE")
+    .have <- vapply(.want, function(k)
+      any(grepl(sprintf("^##INFO=<ID=%s,", k), .hdr, perl = TRUE)), logical(1))
+    jm_hdr_note <- sprintf(
+      paste0("Merged VCF <code>%s</code> &mdash; %d header meta-lines. ",
+             "INFO declared: <b>%s</b>. Absent: %s."),
+      basename(.cmv), length(.hdr),
+      if (any(.have))  paste(names(.have)[.have],  collapse = ", ") else "none",
+      if (any(!.have)) paste(names(.have)[!.have], collapse = ", ") else "none")
+  }
+}
+```
+
+```{r cohort-merge-summary}
+#| echo: false
+if (!is.null(jm_summary)) {
+  knitr::kable(jm_summary, format = "html",
+               table.attr = 'class="table table-sm" style="width:auto;"')
+}
+```
+
+```{r cohort-merge-table}
+#| echo: false
+#| column: screen-inset
+if (!is.null(jm_recur) && nrow(jm_recur) > 0) {
+  DT::datatable(
+    jm_recur,
+    escape     = FALSE,
+    filter     = "top",
+    rownames   = FALSE,
+    width      = "100%",
+    extensions = c("Buttons", "Scroller"),
+    options = list(
+      dom     = "Bfrtip",
+      buttons = list("copy", list(extend = "csv", text = "Download recurrence TSV")),
+      scrollY = 420, scroller = TRUE, scrollX = TRUE, pageLength = 25
+    ),
+    caption = htmltools::tags$caption(
+      style = "caption-side: top; text-align: left; font-size:0.9em;",
+      htmltools::HTML(paste0(
+        "Jasmine cohort merge &mdash; one row per (cluster &times; sample). ",
+        "<code>record_class</code> is TIERED when the row is in this report's ",
+        "tiered table, and RESCUED when it is a sub-threshold call recovered ",
+        "from the pre-filter VEP VCF. <code>n_tiered</code> against ",
+        "<code>n_any</code> separates over-filtering from lack of ",
+        "corroboration."))))
+} else {
+  htmltools::HTML(paste0("<p style='color:#666; margin:10px 0;'>", jm_note, "</p>"))
+}
+```
+
+::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
+`r if (!is.null(jm_hdr_note)) htmltools::HTML(jm_hdr_note) else "Merged VCF not staged in this render."`
+:::
+
+## Row {height="240px"}
+
+### Per-sample AnnotSV summary {title="Per-sample AnnotSV summary"}
+
+```{r sample-stats-table}
+#| column: screen-inset
+DT::datatable(
+  stats_df,
+  escape     = FALSE,
+  filter     = "top",
+  rownames   = FALSE,
+  width      = "100%",
+  extensions = "Buttons",
+  options    = list(
+    dom        = "Bfrtip",
+    buttons    = c("csv", "excel"),
+    pageLength = 25,
+    scrollX    = TRUE,
+    autoWidth  = TRUE
+  )
+)
+```
+
+
+# SV
+
+## Row {height="45%" .tabset}
+
+### SVTYPE {title="SVTYPE distribution"}
+
+```{r plot-svtype}
+#| eval: !expr nrow(pass2_long) > 0
+
+p1 <- pass2_clean |>
+  count(SAMPLE, SVTYPE, name = "n") |>
+  ggplot(aes(x = SAMPLE, y = n, fill = SVTYPE,
+             text = paste0("<b>Sample:</b> ", SAMPLE,
+                           "<br><b>SVTYPE:</b> ", SVTYPE,
+                           "<br><b>Variants (pass2):</b> ", n))) +
+  geom_col(position = "dodge") +
+  scale_fill_viridis_d(option = "viridis", end = 0.9) +
+  labs(title    = "Pass2 variants by SVTYPE",
+       x = NULL, y = "Variant count") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right",
+        axis.text.x     = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+ggplotly(p1, tooltip = "text") |> config(displayModeBar = FALSE)
+```
+
+### ACMG {title="ACMG class + AnnotSV ranking score"}
+
+```{r plot-acmg}
+#| eval: !expr nrow(pass2_long) > 0
+
+p2a <- pass2_clean |>
+  count(SAMPLE, ACMG_class_clean, name = "n") |>
+  ggplot(aes(x = SAMPLE, y = n, fill = ACMG_class_clean,
+             text = paste0("<b>Sample:</b> ", SAMPLE,
+                           "<br><b>ACMG class:</b> ", ACMG_class_clean,
+                           "<br><b>Variants:</b> ", n))) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = acmg_palette, name = "ACMG class",
+                    drop = FALSE, na.value = "grey70") +
+  labs(title    = "ACMG class distribution",
+       subtitle = "counts of variants per sample, colored by ACMG ranking (NA = grey)",
+       x = NULL, y = "Variant count") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+# Plot the AnnotSV ranking score as jittered points (no violin / density).
+# geom_violin crashes plotly's to_basic.GeomViolin when the layer's internal data frame
+# has too few rows ("argument 1 is not a vector" from order(data[["y"]])).
+# geom_jitter has no density step and works for any N ≥ 1.
+p2b_data <- pass2_clean |>
+  filter(!is.na(ranking_score), ranking_score > 0)
+
+if (nrow(p2b_data) > 0) {
+  p2b <- p2b_data |>
+    ggplot(aes(x = SAMPLE, y = ranking_score, color = SAMPLE,
+               text = paste0("<b>Sample:</b> ", SAMPLE,
+                             "<br><b>ID:</b> ", ID,
+                             "<br><b>SVTYPE:</b> ", SVTYPE,
+                             "<br><b>AnnotSV ranking score:</b> ", ranking_score))) +
+    geom_jitter(width = 0.15, height = 0, alpha = 0.8, size = 3) +
+    scale_color_viridis_d(option = "mako", end = 0.85, guide = "none") +
+    labs(title    = "AnnotSV ranking score",
+         subtitle = "Per-variant AnnotSV ranking score (jittered) — only records with score > 0 shown",
+         x = NULL, y = "Score") +
+    theme_minimal(base_size = 12) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+  subplot(ggplotly(p2a, tooltip = "text") |> config(displayModeBar = FALSE),
+          ggplotly(p2b, tooltip = "text") |> config(displayModeBar = FALSE),
+          nrows = 1, titleY = TRUE, margin = 0.06)
+} else {
+  ggplotly(p2a, tooltip = "text") |> config(displayModeBar = FALSE)
+}
+```
+
+### ST17 {title="ST17 recurrence hits by SVTYPE"}
+
+```{r plot-st17}
+#| eval: !expr nrow(pass2_long) > 0
+
+# Map each SVTYPE. the matching name_ST17_<SVTYPE> column
+st17_cols <- c(BND = "name_ST17_BND",
+               DEL = "name_ST17_DEL",
+               DUP = "name_ST17_DUP",
+               INS = "name_ST17_INS",
+               INV = "name_ST17_INV")
+
+# rlang-patterns: parameterize over the (SVTYPE, ST17 column) pair using
+# tidyselect's .data[[ ]] to look up the column by string name per group.
+# Uses pass2_clean (not pass2_long) so ST17 SVTYPE-mismatch blanking and
+# BND partner-chromosome validation are already applied.
+plot3_data <- imap_dfr(st17_cols, function(col_name, svtype) {
+  if (!col_name %in% names(pass2_clean)) return(tibble())
+  pass2_clean |>
+    filter(SVTYPE == svtype) |>
+    mutate(has_st17_hit = is_meaningful(.data[[col_name]])) |>
+    count(SAMPLE, has_st17_hit, name = "n") |>
+    mutate(SVTYPE = svtype, .before = 1)
+})
+
+p3 <- ggplot(plot3_data,
+             aes(x = SAMPLE, y = n, fill = has_st17_hit,
+                 text = paste0("<b>Sample:</b> ", SAMPLE,
+                               "<br><b>SVTYPE:</b> ", SVTYPE,
+                               "<br><b>", ifelse(has_st17_hit, "ST17 Hit", "ST17 Miss"), "</b>",
+                               "<br><b>Variants:</b> ", n))) +
+  geom_col(position = "stack") +
+  facet_wrap(~ SVTYPE, nrow = 1, scales = "free_y") +
+  scale_fill_viridis_d(option = "viridis", begin = 0.2, end = 0.85,
+                       name = "ST17 hit?",
+                       labels = c(`TRUE` = "Hit", `FALSE` = "Miss")) +
+  labs(title    = "ST17 recurrence-BED hits by SVTYPE",
+       subtitle = "Per-sample variants overlapping the ST17 T-ALL recurrence BED, by SV type",
+       x = NULL, y = "Variant count") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+ggplotly(p3, tooltip = "text") |> config(displayModeBar = FALSE)
+```
+
+### VAF {title="VAF / AF metric distributions"}
+
+```{r plot-vaf-dist}
+#| eval: !expr nrow(pass2_long) > 0
+
+
+# somatic-signal. gnomAD_SV_AF and TUMOUR_AF are comma-joined multi-overlap tuples; take the max as the population-frequency / tumor-signal
+parse_max_af <- function(x) {
+  if (is.na(x) || !nzchar(x)) return(NA_real_)
+  vals <- suppressWarnings(as.numeric(str_split(x, ",")[[1]]))
+  vals <- vals[!is.na(vals)]
+  if (length(vals) == 0) NA_real_ else max(vals)
+}
+
+vaf_metrics <- pass2_clean |>
+  mutate(
+    hVAF_HP1      = suppressWarnings(as.numeric(str_split_fixed(hVAF, ",", 3)[, 1])),
+    hVAF_HP2      = suppressWarnings(as.numeric(str_split_fixed(hVAF, ",", 3)[, 2])),
+    VAF_num       = suppressWarnings(as.numeric(VAF)),
+    gnomAD_AF_max = vapply(gnomAD_SV_AF, parse_max_af, numeric(1), USE.NAMES = FALSE),
+    TUMOUR_AF_max = vapply(TUMOUR_AF,    parse_max_af, numeric(1), USE.NAMES = FALSE)
+  ) |>
+  select(SAMPLE, ID, SVTYPE, driver_tier,
+         `Severus VAF`            = VAF_num,
+         `Severus hVAF (HP1)`     = hVAF_HP1,
+         `Severus hVAF (HP2)`     = hVAF_HP2,
+         `SAVANA TUMOUR_AF (max)` = TUMOUR_AF_max,
+         `gnomAD_SV_AF (max)`     = gnomAD_AF_max) |>
+  pivot_longer(cols      = -c(SAMPLE, ID, SVTYPE, driver_tier),
+               names_to  = "metric",
+               values_to = "value") |>
+  filter(!is.na(value))
+
+p_vaf <- vaf_metrics |>
+  ggplot(aes(x = metric, y = value,
+             color = as.factor(driver_tier),
+             text  = paste0("<b>Sample:</b> ",  SAMPLE,
+                            "<br><b>ID:</b> ",    ID,
+                            "<br><b>SVTYPE:</b> ", SVTYPE,
+                            "<br><b>Driver tier:</b> T", driver_tier,
+                            "<br><b>", metric, ":</b> ", round(value, 4)))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.15,
+               color = "grey40", fill = "grey85", show.legend = FALSE) +
+  geom_jitter(width = 0.2, height = 0, alpha = 0.75, size = 2) +
+  scale_color_manual(values = c(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d"),
+                     name   = "Driver tier",
+                     labels = c(`1` = "T1 (ST17)",
+                                `2` = "T2 (Candidate)",
+                                `3` = "T3 (Other)")) +
+  labs(title    = "VAF / AF metric distributions",
+       subtitle = "Boxplots summarize distribution; points are individual pass2 SVs colored by driver_tier",
+       x = NULL, y = "Allele frequency") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggplotly(p_vaf, tooltip = "text") |> config(displayModeBar = FALSE)
+```
+
+### Read depth {title="Supporting read-depth distributions"}
+
+```{r plot-read-support}
+#| eval: !expr nrow(pass2_long) > 0
+
+# Three read-support metrics — Severus reference reads (DR), Severus variant reads (DV), and SAVANA TUMOUR_READ_SUPPORT. Higher DV / TUMOUR_READ_SUPPORT. higher confidence in the somatic call. 
+read_metrics <- pass2_clean |>
+  mutate(across(c(DR, DV, TUMOUR_READ_SUPPORT),
+                ~ suppressWarnings(as.numeric(.x)))) |>
+  select(SAMPLE, ID, SVTYPE, driver_tier,
+         `Severus DR (ref reads)`      = DR,
+         `Severus DV (variant reads)`  = DV,
+         `SAVANA TUMOUR_READ_SUPPORT`  = TUMOUR_READ_SUPPORT) |>
+  pivot_longer(cols      = -c(SAMPLE, ID, SVTYPE, driver_tier),
+               names_to  = "metric",
+               values_to = "reads") |>
+  filter(!is.na(reads), reads > 0)
+
+p_reads <- read_metrics |>
+  ggplot(aes(x = metric, y = reads, color = SVTYPE,
+             text = paste0("<b>Sample:</b> ",  SAMPLE,
+                           "<br><b>ID:</b> ",    ID,
+                           "<br><b>SVTYPE:</b> ", SVTYPE,
+                           "<br><b>Driver tier:</b> T", driver_tier,
+                           "<br><b>", metric, ":</b> ", reads, " reads"))) +
+  geom_boxplot(outlier.shape = NA, alpha = 0.15,
+               color = "grey40", fill = "grey85", show.legend = FALSE) +
+  geom_jitter(width = 0.2, height = 0, alpha = 0.75, size = 2) +
+  scale_color_manual(values = svtype_colors, name = "SVTYPE") +
+  scale_y_log10() +
+  labs(title    = "Supporting read-depth distributions",
+       subtitle = "Boxplots per read-support metric; points are pass2 SVs colored by SVTYPE (log10 y-axis)",
+       x = NULL, y = "Read count (log10)") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggplotly(p_reads, tooltip = "text") |> config(displayModeBar = FALSE)
+```
+
+### Driver tier {title="Driver-tier prioritized variants per sample"}
+
+```{r plot-driver-tier}
+#| eval: !expr nrow(pass2_long) > 0
+
+# One bar per sample, stacked by driver_tier.
+tier_counts <- pass2_clean |>
+  count(SAMPLE, driver_tier, name = "n", .drop = FALSE) |>
+  mutate(driver_tier = factor(paste0("T", driver_tier), levels = c("T1", "T2", "T3")))
+
+p_tier <- tier_counts |>
+  ggplot(aes(x = SAMPLE, y = n, fill = driver_tier,
+             text = paste0("<b>Sample:</b> ",  SAMPLE,
+                           "<br><b>Driver tier:</b> ", driver_tier,
+                           "<br><b>Variants:</b> ",    n))) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = c(T1 = "#2CA02C", T2 = "#D68910", T3 = "#6c757d"),
+                    name = "Driver tier",
+                    labels = c(T1 = "T1 — ST17 hit",
+                               T2 = "T2 — Candidate gene",
+                               T3 = "T3 — Other pass2 evidence")) +
+  labs(title    = "Driver-tier prioritized pass2 variants per sample",
+       subtitle = "T1 = SVTYPE-matched ST17 recurrence (empirical T-ALL truth); T2 = candidate-gene hit; T3 = other pass2 evidence",
+       x = NULL, y = "Variant count") +
+  theme_minimal(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+ggplotly(p_tier, tooltip = "text") |> config(displayModeBar = FALSE)
+```
+
+
+
+
+
+## Row {height="55%"}
+
+### SV pass2 table {title="SV pass2 variant table" fill="true"}
+
+```{r pass2-table}
+#| eval: !expr nrow(pass2_long) > 0
+#| column: screen-inset
+
+# Display columns for the DT: full schema minus RE_gene
+# driver prioritization.
+display_cols <- c(
+  "SAMPLE", "sample_id", "driver_tier", "SVTYPE", "DETAILED_TYPE", "ALT",
+  "breakpoint", "CytoBand_display", "has_mate", "SVLEN", "CALLER",
+  "Gene_name_display", "Candidate_genes", "ST17_hit",
+  "AnnotSV_ranking_score", "ACMG_class",
+  "VAF", "hVAF", "DR", "DV", "TUMOUR_READ_SUPPORT", "TUMOUR_AF",
+  "ClinVar_SV_CLNSIG"
+)
+# sample_id (friendly cohort label) is joined in from sample_metadata via
+# merge_sample_metadata() earlier — silently absent when no metadata CSV.
+display_cols <- intersect(display_cols, names(pass2_clean))
+
+# Sort: driver_tier ascending (T1 first), tier_score descending. higher-recurrence / more-candidates / higher-AnnotSV-rank first 
+
+
+pass2_display <- pass2_clean |>
+  arrange(driver_tier, desc(tier_score), SVTYPE, SAMPLE) |>
+  select(all_of(display_cols))
+
+# svtype_colors palette is defined in the load-pass2 chunk
+svtype_col_js <- which(names(pass2_display) == "SVTYPE") - 1L
+
+# Build a JS render callback that wraps each SVTYPE cell value in a
+# pill-shaped span with an INLINE style attribute.
+# overrides cyborg theme's dark-mode cell defaults AND the broader white-bg
+# `!important` rules in the dt-readability chunk above
+svtype_render_js <- DT::JS(sprintf(
+  "function(data, type, row) {
+     if (type !== 'display' || data == null || data === '') return data;
+     var colors = %s;
+     var c = colors[data] || '#6c757d';
+     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
+            'font-weight:bold;padding:2px 8px;border-radius:4px;' +
+            'display:inline-block;min-width:36px;text-align:center;\">' +
+            data + '</span>';
+   }",
+  jsonlite::toJSON(as.list(svtype_colors), auto_unbox = TRUE)
+))
+
+# driver_tier badge palette  
+tier_colors <- c(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d")
+tier_col_js <- which(names(pass2_display) == "driver_tier") - 1L
+tier_render_js <- DT::JS(sprintf(
+  "function(data, type, row) {
+     if (type !== 'display' || data == null || data === '') return data;
+     var colors = %s;
+     var c = colors[String(data)] || '#6c757d';
+     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
+            'font-weight:bold;padding:2px 10px;border-radius:10px;' +
+            'display:inline-block;min-width:30px;text-align:center;\">' +
+            'T' + data + '</span>';
+   }",
+  jsonlite::toJSON(as.list(tier_colors), auto_unbox = TRUE)
+))
+
+DT::datatable(
+  pass2_display,
+  escape     = FALSE,
+  filter     = "top",
+  rownames   = FALSE,
+  width      = "100%",
+  extensions = c("Buttons", "RowGroup"),
+  options    = list(
+    dom        = "Bfrtip",
+    buttons    = c("csv", "excel"),
+    pageLength = 15,
+    scrollX    = TRUE,
+    autoWidth  = TRUE,
+    # Group rows by driver_tier — one T1/T2/T3 header bar.
+    rowGroup   = list(dataSrc = tier_col_js),
+    # Initial sort: driver_tier ASC keeps rowGroup buckets contiguous; secondary sort of AnnotSV_ranking_score DESC within each tier 
+    order      = list(list(tier_col_js, "asc")),
+    columnDefs = list(
+      list(targets = svtype_col_js, render = svtype_render_js),
+      list(targets = tier_col_js,   render = tier_render_js)
+    )
+  )
+)
+```
+
+# CNA
+
+## Row {height="120px"}
+
+```{r vb-cna-t1}
+#| content: valuebox
+#| title: "Tier-1 CNAs"
+list(icon = "bullseye", color = "success",
+     value = vb_count("cna_pass2_clean", function(df) df$driver_tier == 1L))
+```
+
+```{r vb-cna-t2}
+#| content: valuebox
+#| title: "Tier-2 CNAs"
+list(icon = "geo-alt", color = "primary",
+     value = vb_count("cna_pass2_clean", function(df) df$driver_tier == 2L))
+```
+
+```{r vb-cna-t3}
+#| content: valuebox
+#| title: "Tier-3 CNAs"
+list(icon = "paperclip", color = "secondary",
+     value = vb_count("cna_pass2_clean", function(df) df$driver_tier == 3L))
+```
+
+```{r vb-cna-unhap}
+#| content: valuebox
+#| title: "Unhaplotyped"
+list(icon = "exclamation-triangle", color = "warning",
+     value = vb_count("cna_pass2_clean", function(df) {
+       (suppressWarnings(as.integer(df$CN1)) %in% 0L) & (suppressWarnings(as.integer(df$CN2)) %in% 0L)
+     }))
+```
+
+## Row {.fill}
+
+### CNA pass2 table {title="CNA pass2 variant table" fill="true"}
+
+
+
+```{r cna-pass2-status}
+if (nrow(cna_pass2_long) == 0) {
+  cat("**No pass2 CNV variants found.** Either FILTER_CNA produced no records ",
+      "matching the prioritization gate for any sample, or the input was not ",
+      "staged. Table below is suppressed.", sep = "")
+}
+```
+
+
+
+```{r cna-pass2-table}
+#| eval: !expr nrow(cna_pass2_long) > 0
+#| column: screen-inset
+
+# Display columns for the DT — the 8 raw name_ST19_* / score_ST19_*
+# columns are consolidated into a single `ST19_hit` column above (top 3
+# score-ordered hits with `parse_st17_pair()`). Raw columns remain in the
+# cohort_cna_pass2.tsv output for programmatic consumers.
+cna_display_cols <- c(
+  "SAMPLE", "sample_id", "driver_tier", "breakpoint", "CytoBand_display", "ID",
+  "CNA_TYPE", "WAKHAN_TYPE", "WAKHAN_ID",
+  "ALT", "SVTYPE", "SVLEN", "CALLER",
+  "TCN", "CN1", "CN2", "CNQ1", "CNQ2",
+  "Candidate_genes",
+  "Gene_name_display", "ACMG_class", "AnnotSV_ranking_score",
+  "P_gain_source", "P_loss_source", "P_ins_source",
+  "ST19_hit",
+  "BPS", "HET", "GT"
+)
+cna_display_cols <- intersect(cna_display_cols, names(cna_pass2_clean))
+
+cna_pass2_display <- cna_pass2_clean |>
+  arrange(driver_tier, desc(tier_score), CNA_TYPE, SAMPLE, CHROM, POS) |>
+  select(all_of(cna_display_cols))
+
+# Reuse the SVTYPE palette for CNA_TYPE (DUP / DEL share colors with SV side).
+cna_type_col_js <- which(names(cna_pass2_display) == "CNA_TYPE") - 1L
+cna_tier_col_js <- which(names(cna_pass2_display) == "driver_tier") - 1L
+
+# Reuse the SV driver_tier renderer palette (T1 green, T2 orange, T3 grey)
+# so the tier badge looks identical across SV / CNA / SNV tables.
+cna_tier_render_js <- DT::JS(sprintf(
+  "function(data, type, row) {
+     if (type !== 'display' || data == null || data === '') return data;
+     var colors = %s;
+     var c = colors[String(data)] || '#6c757d';
+     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
+            'font-weight:bold;padding:2px 10px;border-radius:10px;' +
+            'display:inline-block;min-width:30px;text-align:center;\">' +
+            'T' + data + '</span>';
+   }",
+  jsonlite::toJSON(list(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d"),
+                    auto_unbox = TRUE)
+))
+
+cna_type_render_js <- DT::JS(sprintf(
+  "function(data, type, row) {
+     if (type !== 'display' || data == null || data === '') return data;
+     var colors = %s;
+     var c = colors[data] || '#6c757d';
+     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
+            'font-weight:bold;padding:2px 8px;border-radius:4px;' +
+            'display:inline-block;min-width:36px;text-align:center;\">' +
+            data + '</span>';
+   }",
+  jsonlite::toJSON(as.list(svtype_colors), auto_unbox = TRUE)
+))
+
+DT::datatable(
+  cna_pass2_display,
+  escape     = FALSE,
+  filter     = "top",
+  rownames   = FALSE,
+  width      = "100%",
+  extensions = c("Buttons", "RowGroup"),
+  options    = list(
+    dom        = "Bfrtip",
+    buttons    = c("csv", "excel"),
+    pageLength = 15,
+    scrollX    = TRUE,
+    autoWidth  = TRUE,
+    rowGroup   = list(dataSrc = cna_tier_col_js),
+    order      = list(list(cna_tier_col_js, "asc")),
+    columnDefs = list(
+      list(targets = cna_type_col_js, render = cna_type_render_js),
+      list(targets = cna_tier_col_js, render = cna_tier_render_js)
+    )
+  )
+)
+```
+
+# SNV
+
+## Row {height="120px"}
+
+```{r vb-snv-t1}
+#| content: valuebox
+#| title: "Tier-1 SNVs"
+list(icon = "bullseye", color = "success",
+     value = vb_count("snv_long", function(df) df$driver_tier == 1L))
+```
+
+```{r vb-snv-t2}
+#| content: valuebox
+#| title: "Tier-2 SNVs"
+list(icon = "geo-alt", color = "primary",
+     value = vb_count("snv_long", function(df) df$driver_tier == 2L))
+```
+
+```{r vb-snv-t3}
+#| content: valuebox
+#| title: "Tier-3 SNVs"
+list(icon = "paperclip", color = "secondary",
+     value = vb_count("snv_long", function(df) df$driver_tier == 3L))
+```
+
+```{r vb-snv-candidate}
+#| content: valuebox
+#| title: "Candidate-gene hits"
+list(icon = "diagram-3", color = "info",
+     value = vb_count("snv_long", function(df) nzchar(df$Candidate_genes)))
+```
+
+## Row {.fill}
+
+### Column {width="65%"}
+
+#### SNV pass2 table {title="SNV pass2 variant table" fill="true"}
+
+```{r snv-status}
+if (nrow(snv_long) == 0) {
+  cat("**No pass-filtered SNVs found.** Either FILTER_SNV produced no records ",
+      "matching the gate for any sample, or the inputs were not staged. ",
+      "Table below is suppressed.", sep = "")
+}
+```
+
+```{r snv-table}
+#| eval: !expr nrow(snv_long) > 0
+#| column: screen-inset
+
+snv_display_cols <- c(
+  "SAMPLE", "sample_id", "driver_tier", "Candidate_genes",
+  "CHROM", "POS", "ID", "REF", "ALT", "CALLER",
+  "CLAIRSTO_VAF", "DEEPSOMATIC_VAF",
+  "SYMBOL", "Consequence", "IMPACT",
+  "HGVSc", "HGVSp", "SIFT", "PolyPhen",
+  "gnomADg_AF", "CLNSIG", "CLNREVSTAT",
+  "SCI", "ONC",
+  # CIViC-derived interpretive columns (parsed from CIVIC INFO field).
+  # SYMBOL / Consequence appear twice — VEP-derived above, CIViC-derived
+  # here — so reviewers can spot annotation disagreements at a glance.
+  "CIViC_Consequence", "CIViC_SYMBOL",
+  "CIViC_Variant_ID", "CIViC_Variant_URL",
+  "CIViC_Entity_Variant_Origin", "CIViC_Entity_Therapies",
+  "CIViC_Assertion_ACMG_Codes"
+)
+snv_display_cols <- intersect(snv_display_cols, names(snv_long))
+
+# DT shows ALL SNVs sorted by driver_tier so T3 records 
+snv_display <- snv_long |>
+  arrange(driver_tier, desc(tier_score), SAMPLE, CHROM, POS) |>
+  select(all_of(snv_display_cols))
+
+snv_tier_col_js <- which(names(snv_display) == "driver_tier") - 1L
+
+# Same green / orange / grey tier badge as SV + CNA tables
+snv_tier_render_js <- DT::JS(sprintf(
+  "function(data, type, row) {
+     if (type !== 'display' || data == null || data === '') return data;
+     var colors = %s;
+     var c = colors[String(data)] || '#6c757d';
+     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
+            'font-weight:bold;padding:2px 10px;border-radius:10px;' +
+            'display:inline-block;min-width:30px;text-align:center;\">' +
+            'T' + data + '</span>';
+   }",
+  jsonlite::toJSON(list(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d"),
+                    auto_unbox = TRUE)
+))
+
+DT::datatable(
+  snv_display,
+  escape = FALSE, filter = "top", rownames = FALSE, width = "100%",
+  extensions = c("Buttons", "RowGroup"),
+  options = list(
+    dom = "Bfrtip", buttons = c("csv", "excel"),
+    pageLength = 15, scrollX = TRUE, autoWidth = TRUE,
+    rowGroup = list(dataSrc = snv_tier_col_js),
+    order = list(list(snv_tier_col_js, "asc")),
+    columnDefs = list(list(targets = snv_tier_col_js, render = snv_tier_render_js))
+  )
+) |>
+  # Round every VAF / allele-frequency column to 3 significant digits for
+  # readability. Raw values (7+ decimals for gnomAD) survive in the cohort_snv.tsv
+  # output for programmatic joins. `intersect(...)` guards against any of
+  # these columns being absent in the display frame (e.g. gnomAD not run).
+  DT::formatRound(
+    columns = intersect(
+      c("CLAIRSTO_VAF", "DEEPSOMATIC_VAF", "gnomADg_AF", "gnomADe_AF"),
+      names(snv_display)
+    ),
+    digits = 3
+  )
+```
+
+### Column {width="35%"}
+
+#### Per-sample SNV summary {height="35%" title="Per-sample SNV summary"}
+
+```{r snv-stats}
+#| eval: !expr nrow(snv_long) > 0
+
+snv_stats <- snv_long |>
+  group_by(SAMPLE) |>
+  summarise(
+    `Total SNVs (pass2)`     = n(),
+    `HIGH IMPACT`            = sum(IMPACT == "HIGH",     na.rm = TRUE),
+    `MODERATE IMPACT`        = sum(IMPACT == "MODERATE", na.rm = TRUE),
+    `ClinVar pathogenic`     = sum(grepl("[Pp]athogenic", CLNSIG), na.rm = TRUE),
+    .groups = "drop"
+  )
+
+DT::datatable(
+  snv_stats,
+  filter = "top", rownames = FALSE,
+  extensions = "Buttons",
+  options = list(dom = "Bfrtip", buttons = c("csv", "excel"), pageLength = 25)
+)
+```
+
+#### Tier-1 lollipop plots {height="65%" title="Tier-1 lollipop plots"}
+
+```{r lollipop-link-table}
+#| eval: !expr exists("lollipop_link_display") && is.data.frame(lollipop_link_display) && nrow(lollipop_link_display) > 0
+
+DT::datatable(
+  lollipop_link_display,
+  escape   = FALSE,
+  rownames = FALSE,
+  options  = list(dom = "t", pageLength = 30, ordering = FALSE, autoWidth = TRUE)
+)
+```
+
+```{r lollipop-empty-state, results = "asis"}
+#| eval: !expr (!exists("lollipop_link_display")) || (!is.data.frame(lollipop_link_display)) || nrow(lollipop_link_display) == 0
+
+cat("No Tier-1 SNVs with a resolvable gene SYMBOL for lollipop plots.\n")
+```
+
+
+
+
+
+
+
+# Information
+
+## Row {height="40%"}
+
+### SV tier scheme {title="SV tier scheme"}
+
+| Tier | Criterion | `tier_score` tie-breaker |
+|---|---|---|
+| **T1** | Any SVTYPE-matched `name_ST17_*` hit (empirical T-ALL recurrence BED). | max integer score across the SVTYPE-matched `score_ST17_*` cells. |
+| **T2** | No ST17 hit, but candidate-gene overlap. | count of overlapping candidate genes. |
+| **T3** | Neither ST17 nor candidate-gene, but survived pass2 vembrane gate. | `AnnotSV_ranking_score`. |
+
+### CNA tier scheme {title="CNA tier scheme"}
+
+| Tier | Criterion | `tier_score` tie-breaker |
+|---|---|---|
+| **T1** | Any of four SVTYPE-matched `name_ST19_Alterations.CNV.Recurrent_*` hits. | max integer score across the four SVTYPE-matched `score_ST19_*` |
+| **T2** | Candidate-gene overlap. | count of overlapping candidate genes. |
+| **T3** | Passed FILTER_CNA on other evidence. | `AnnotSV_ranking_score`. |
+
+### SNV tier scheme {title="SNV tier scheme"}
+
+| Tier | Criterion | `tier_score` tie-breaker |
+|---|---|---|
+| **T1** | OncoKB `ONC` = "Oncogenic" AND `SYMBOL` in candidate panel. | max(`CLAIRSTO_VAF`, `DEEPSOMATIC_VAF`). |
+| **T2** | ClinVar `CLNSIG` pathogenic-leaning OR `SYMBOL` in candidate panel. | same VAF max. |
+| **T3** | Passed FILTER_SNV on other evidence (SIFT/PolyPhen). | same VAF max. |
+
+## Row {height="55%" .tabset}
+
+### SV columns {title="SV column definitions"}
+
+```{r pass2-sv-datadict-btn, results = "asis"}
+#| eval: !expr exists("pass2_clean") && nrow(pass2_clean) > 0 && exists("dict_download_button")
+cat(dict_download_button("data_dict_sv", "SV"))
+```
+
+
+```{r pass2-sv-datadict, message = FALSE, warning = FALSE}
+#| eval: !expr exists("pass2_clean") && nrow(pass2_clean) > 0 && exists("render_data_dict")
+
+# Column-definition table for the SV pass2 DT below. Limited to the columns
+# actually shown in the DT (not the full VCF header schema); the "Download
+# full data dictionary" button above links to the complete TSV for anyone
+# who needs the whole header set.
+# display_cols vector must stay in sync with the `pass2-table` chunk.
+sv_display_cols <- intersect(c(
+  "SAMPLE", "sample_id", "driver_tier", "SVTYPE", "DETAILED_TYPE", "ALT",
+  "breakpoint", "CytoBand_display", "has_mate", "SVLEN", "CALLER",
+  "Gene_name_display", "Candidate_genes", "ST17_hit",
+  "AnnotSV_ranking_score", "ACMG_class",
+  "VAF", "hVAF", "DR", "DV", "TUMOUR_READ_SUPPORT", "TUMOUR_AF",
+  "ClinVar_SV_CLNSIG"
+), names(pass2_clean))
+
+render_data_dict(
+  pass2_clean[, sv_display_cols, drop = FALSE], dict_sv,
+  caption = "SV column definitions (limited to columns shown in the DT below)"
+)
+```
+
+
+### CNA columns {title="CNA column definitions"}
+
+```{r pass2-cna-datadict-btn, results = "asis"}
+#| eval: !expr exists("cna_pass2_clean") && nrow(cna_pass2_clean) > 0 && exists("dict_download_button")
+cat(dict_download_button("data_dict_cna", "CNA"))
+```
+
+
+```{r pass2-cna-datadict, message = FALSE, warning = FALSE}
+#| eval: !expr exists("cna_pass2_clean") && nrow(cna_pass2_clean) > 0 && exists("render_data_dict")
+
+# Column-definition table for the CNA pass2 DT below (columns shown in the DT
+# only; the download button above links to the complete VCF header set).
+# Kept in sync with the `cna-pass2-table` chunk's cna_display_cols vector.
+cna_dict_cols <- intersect(c(
+  "SAMPLE", "sample_id", "driver_tier", "breakpoint", "CytoBand_display", "ID",
+  "CNA_TYPE", "WAKHAN_TYPE", "WAKHAN_ID",
+  "ALT", "SVTYPE", "SVLEN", "CALLER",
+  "TCN", "CN1", "CN2", "CNQ1", "CNQ2",
+  "Candidate_genes",
+  "Gene_name_display", "ACMG_class", "AnnotSV_ranking_score",
+  "P_gain_source", "P_loss_source", "P_ins_source",
+  "ST19_hit",
+  "BPS", "HET", "GT"
+), names(cna_pass2_clean))
+
+render_data_dict(
+  cna_pass2_clean[, cna_dict_cols, drop = FALSE], dict_cna,
+  caption = "CNA column definitions — VCF INFO/FORMAT/FILTER header + qmd-computed columns"
+)
+```
+
+
+### SNV columns {title="SNV column definitions"}
+
+```{r snv-datadict-btn, results = "asis"}
+#| eval: !expr exists("snv_long") && nrow(snv_long) > 0 && exists("dict_download_button")
+cat(dict_download_button("data_dict_snv", "SNV"))
+```
+
+
+```{r snv-datadict, message = FALSE, warning = FALSE}
+#| eval: !expr exists("snv_long") && nrow(snv_long) > 0 && exists("render_data_dict")
+
+# Column-definition table for the SNV DT below (columns shown in the DT only;
+# the download button above links to the complete VCF header set).
+# Kept in sync with the `snv-table` chunk's snv_display_cols vector.
+snv_dict_cols <- intersect(c(
+  "SAMPLE", "sample_id", "driver_tier", "Candidate_genes",
+  "CHROM", "POS", "ID", "REF", "ALT", "CALLER",
+  "CLAIRSTO_VAF", "DEEPSOMATIC_VAF",
+  "SYMBOL", "Consequence", "IMPACT",
+  "HGVSc", "HGVSp", "SIFT", "PolyPhen",
+  "gnomADg_AF", "CLNSIG", "CLNREVSTAT",
+  "SCI", "ONC",
+  "CIViC_Consequence", "CIViC_SYMBOL",
+  "CIViC_Variant_ID", "CIViC_Variant_URL",
+  "CIViC_Entity_Variant_Origin", "CIViC_Entity_Therapies",
+  "CIViC_Assertion_ACMG_Codes"
+), names(snv_long))
+
+render_data_dict(
+  snv_long[, snv_dict_cols, drop = FALSE], dict_snv,
+  caption = "SNV column definitions — VCF INFO/FORMAT/FILTER header + qmd-computed columns"
+)
+```
+
+
+## Row {.collapsed}
+
+### Pipeline notes {title="DISCO promotion + citations"}
+
+**Only `driver_tier == 1` records** from all three variant tables are serialized into the DISCO plot's `mlst` array. The cohort DISCO plot on the Overview page shows the union of Tier-1 events across every sample. Per-sample DISCO HTMLs are written to `protein_paint_out/` under `results/sv_report/`.
+
+The `params$candidate_genes` panel and customized BED files from `nextflow.config` are found in `results/annotsv/setupuseranno/` for down-stream investigations.
+
+```{r disco-plot-status}
+#| eval: !expr isTRUE(params$disco_enable)
+
+if (!exists("mlst_all") || nrow(mlst_all) == 0) {
+  cat("**No Tier-1 variants to display in DISCO plot.** ",
+      "The plot is populated from driver_tier == 1 records across SV BNDs, ",
+      "CNAs, and SNVs — none survived Tier-1 promotion in this run.", sep = "")
+} else {
+  n_snv <- sum(mlst_all$dt == 1, na.rm = TRUE)
+  n_cna <- sum(mlst_all$dt == 4, na.rm = TRUE)
+  n_bnd <- sum(mlst_all$dt == 2, na.rm = TRUE)
+  cat(sprintf("**Tier-1 variants displayed:** %d SNV point mutation(s), %d CNA segment(s), %d BND fusion(s). ",
+              n_snv, n_cna, n_bnd),
+      sprintf("Backend: `%s`. CNA `value` = log2(pmax(TCN, 0.25) / 2) — 0 = diploid, +1 = 4-copy amp, -1 = 1-copy loss.",
+              params$proteinpaint_host), sep = "")
+}
+```
+
+
+**Citations**
+
+1. Pölönen, P., Di Giacomo, D., Seffernick, A.E. et al. The genomic basis of childhood T-lineage acute lymphoblastic leukaemia. Nature 632, 1082–1091 (2024).
+2. Suehnholz, S.P. et al. Quantifying the Expanding Landscape of Clinical Actionability for Patients with Cancer. Cancer Discov 14(1), 49–65 (2024).
+3. Ahmad, T. et al. Wakhan: reconstruction of chromosome-scale copy number profiles of tumor genomes with long-read sequencing. medRxiv (2025).
+4. Keskus, A.G. et al. Severus detects somatic structural variation and complex rearrangements in cancer genomes using long-read sequencing. Nat Biotechnol 44, 247–257 (2026).
+5. Elrick, H. et al. SAVANA: reliable analysis of somatic structural variants and copy number aberrations using long-read sequencing. Nat Methods 22, 1436–1446 (2025).
+6. Zheng, Z. et al. ClairS: a deep-learning method for long-read somatic small variant calling. bioRxiv (2023).
+7. Park, J. et al. Accurate somatic small variant discovery for multiple sequencing technologies with DeepSomatic. Nat Biotechnol (2025).

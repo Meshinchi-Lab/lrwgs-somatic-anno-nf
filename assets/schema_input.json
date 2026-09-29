@@ -1,0 +1,61 @@
+{
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://raw.githubusercontent.com/Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno/master/assets/schema_input.json",
+    "title": "Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno pipeline - params.input schema",
+    "description": "Schema for the samplesheet provided with params.input. One row per sample; each row supplies the haplotagged BAM plus the upstream SV, CNA and SNV VCFs that this pipeline merges and annotates. Columns are consumed in subworkflows/local/utils_nfcore_nanopore_variant_calling_anno/main.nf.",
+    "type": "array",
+    "items": {
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "pattern": "^\\S+$",
+                "errorMessage": "Sample id must be provided and cannot contain spaces",
+                "meta": ["id"]
+            },
+            "bam": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^\\S+\\.bam$",
+                "errorMessage": "Haplotagged BAM must be provided, cannot contain spaces and must have extension '.bam'. An index is required alongside it at '<bam>.bai'."
+            },
+            "severus_sv": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^\\S+\\.vcf(\\.gz)?$",
+                "errorMessage": "Severus somatic SV VCF must be provided and must have extension '.vcf' or '.vcf.gz'"
+            },
+            "savana_sv": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^\\S+\\.vcf(\\.gz)?$",
+                "errorMessage": "SAVANA SV VCF must have extension '.vcf' or '.vcf.gz'. This column is OPTIONAL: leave the value empty (or omit the column) to run the SAVANA process instead of supplying a pre-computed VCF."
+            },
+            "wahkan_cnv": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^\\S+\\.vcf(\\.gz)?$",
+                "errorMessage": "Wakhan CNA VCF must be provided and must have extension '.vcf' or '.vcf.gz'. NB the column name is spelled 'wahkan_cnv' in the pipeline."
+            },
+            "clairsto_snv": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^\\S+\\.vcf(\\.gz)?$",
+                "errorMessage": "ClairS-TO SNV VCF must be provided and must have extension '.vcf' or '.vcf.gz'"
+            },
+            "deepsomatic_snv": {
+                "type": "string",
+                "format": "file-path",
+                "exists": true,
+                "pattern": "^\\S+\\.vcf(\\.gz)?$",
+                "errorMessage": "DeepSomatic SNV VCF must be provided and must have extension '.vcf' or '.vcf.gz'"
+            }
+        },
+        "required": ["id", "bam", "severus_sv", "wahkan_cnv", "clairsto_snv", "deepsomatic_snv"]
+    }
+}

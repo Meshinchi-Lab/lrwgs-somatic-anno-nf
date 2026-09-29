@@ -1,0 +1,7 @@
+name: vembrane_filter_with_aux
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - bioconda::vembrane=2.4.0
+  - bioconda::bcftools=1.20

@@ -1,0 +1,34 @@
+basename	config_path	source_url
+GCA_000001405.15_GRCh38_no_alt_analysis_set.fna	data/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna	https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/001/405/GCA_000001405.15_GRCh38/seqs_for_alignment_pipelines.ucsc_ids/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna.gz
+AnnotSV	data/reference/AnnotSV	https://github.com/lgmgeo/AnnotSV (make PREFIX=. install-human-annotation; bundle served from https://www.lbgi.fr/AnnotSV/)
+homo_sapiens_vep_115_GRCh38.tar.gz	data/vep/	https://ftp.ensembl.org/pub/release-115/variation/indexed_vep_cache/homo_sapiens_vep_115_GRCh38.tar.gz
+gnomad.v4.1.sv.sites.vcf.gz	data/gnomad_sv_cnv/gnomad.v4.1.sv.sites.vcf.gz	https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/genome_sv/gnomad.v4.1.sv.sites.vcf.gz
+gnomad.v4.1.sv.sites.vcf.gz.tbi	data/gnomad_sv_cnv/gnomad.v4.1.sv.sites.vcf.gz.tbi	https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/genome_sv/gnomad.v4.1.sv.sites.vcf.gz.tbi
+gnomad.v4.1.cnv.all.vcf.gz	data/gnomad_sv_cnv/gnomad.v4.1.cnv.all.vcf.gz	https://gnomad-public-us-east-1.s3.amazonaws.com/release/4.1/exome_cnv/gnomad.v4.1.cnv.all.vcf.gz
+nstd102.GRCh38.variant_call.vcf.gz	data/clinvar/nstd102.GRCh38.variant_call.vcf.gz	https://ftp.ncbi.nlm.nih.gov/pub/dbVar/data/Homo_sapiens/by_study/vcf/nstd102.GRCh38.variant_call.vcf.gz
+nstd102.GRCh38.variant_call.vcf.gz.tbi	data/clinvar/nstd102.GRCh38.variant_call.vcf.gz.tbi	https://ftp.ncbi.nlm.nih.gov/pub/dbVar/data/Homo_sapiens/by_study/vcf/nstd102.GRCh38.variant_call.vcf.gz.tbi
+clinvar_20260627.vcf.gz	data/clinvar/clinvar_20260627.vcf.gz	https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar_20260627.vcf.gz
+clinvar_20260627.vcf.gz.tbi	data/clinvar/clinvar_20260627.vcf.gz.tbi	https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar_20260627.vcf.gz.tbi
+01-Jul-2026-civic_accepted.vcf.gz	data/reference/01-Jul-2026-civic_accepted.vcf.gz	https://civicdb.org/downloads/01-Jul-2026/01-Jul-2026-civic_accepted.vcf
+01-Jul-2026-civic_accepted.vcf.gz.tbi	data/reference/01-Jul-2026-civic_accepted.vcf.gz.tbi	derived: bcftools index -t (no upstream URL)
+hg19ToHg38.over.chain.gz	data/reference/hg19ToHg38.over.chain.gz	https://hgdownload.soe.ucsc.edu/goldenPath/hg19/liftOver/hg19ToHg38.over.chain.gz
+cytoBandIdeo.hg38.txt.gz	data/reference/cytoBandIdeo.hg38.txt.gz	https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/cytoBandIdeo.txt.gz
+EnsDb.Hsapiens.v110.sqlite	data/reference/EnsDb.Hsapiens.v110.sqlite	Bioconductor AnnotationHub AH113665 (ensembldb); https://bioconductor.org/packages/AnnotationHub/
+contigs.chr.hg38.txt	data/reference/contigs.chr.hg38.txt	https://raw.githubusercontent.com/cortes-ciriano-lab/savana/refs/heads/main/example/contigs.chr.hg38.txt
+HGNC_TCR_genes.tsv	data/reference/HGNC_TCR_genes.tsv	curated from HGNC gene groups (TR receptor loci); https://www.genenames.org/data/genegroup/
+ST9.alterations_OncoKB_cancer_genes.txt	data/reference/genomic_basis_tall/ST9.alterations_OncoKB_cancer_genes.txt	derived from Suppl. Table 9 of https://doi.org/10.1038/s41586-024-07807-0 (Polonen et al. Nature 632:1082, 2024)
+ST16_Alterations.SV.Recurrent_BND.bed	data/reference/genomic_basis_tall/ST16_Alterations.SV.Recurrent_BND.bed	derived from Suppl. Table 16 of https://doi.org/10.1038/s41586-024-07807-0
+ST16_Alterations.SV.Recurrent_DEL.bed	data/reference/genomic_basis_tall/ST16_Alterations.SV.Recurrent_DEL.bed	derived from Suppl. Table 16 of https://doi.org/10.1038/s41586-024-07807-0
+ST16_Alterations.SV.Recurrent_DUP.bed	data/reference/genomic_basis_tall/ST16_Alterations.SV.Recurrent_DUP.bed	derived from Suppl. Table 16 of https://doi.org/10.1038/s41586-024-07807-0
+ST16_Alterations.SV.Recurrent_INS.bed	data/reference/genomic_basis_tall/ST16_Alterations.SV.Recurrent_INS.bed	derived from Suppl. Table 16 of https://doi.org/10.1038/s41586-024-07807-0
+ST16_Alterations.SV.Recurrent_INV.bed	data/reference/genomic_basis_tall/ST16_Alterations.SV.Recurrent_INV.bed	derived from Suppl. Table 16 of https://doi.org/10.1038/s41586-024-07807-0
+ST17_Alterations.SV.All_BND.bed	data/reference/genomic_basis_tall/ST17_Alterations.SV.All_BND.bed	derived from Suppl. Table 17 of https://doi.org/10.1038/s41586-024-07807-0
+ST17_Alterations.SV.All_DEL.bed	data/reference/genomic_basis_tall/ST17_Alterations.SV.All_DEL.bed	derived from Suppl. Table 17 of https://doi.org/10.1038/s41586-024-07807-0
+ST17_Alterations.SV.All_DUP.bed	data/reference/genomic_basis_tall/ST17_Alterations.SV.All_DUP.bed	derived from Suppl. Table 17 of https://doi.org/10.1038/s41586-024-07807-0
+ST17_Alterations.SV.All_INS.bed	data/reference/genomic_basis_tall/ST17_Alterations.SV.All_INS.bed	derived from Suppl. Table 17 of https://doi.org/10.1038/s41586-024-07807-0
+ST17_Alterations.SV.All_INV.bed	data/reference/genomic_basis_tall/ST17_Alterations.SV.All_INV.bed	derived from Suppl. Table 17 of https://doi.org/10.1038/s41586-024-07807-0
+ST19_Alterations.CNV.Recurrent_AMP.bed	data/reference/genomic_basis_tall/ST19_Alterations.CNV.Recurrent_AMP.bed	derived from Suppl. Table 19 of https://doi.org/10.1038/s41586-024-07807-0
+ST19_Alterations.CNV.Recurrent_DEL.bed	data/reference/genomic_basis_tall/ST19_Alterations.CNV.Recurrent_DEL.bed	derived from Suppl. Table 19 of https://doi.org/10.1038/s41586-024-07807-0
+ST19_Alterations.CNV.Recurrent_GAIN.bed	data/reference/genomic_basis_tall/ST19_Alterations.CNV.Recurrent_GAIN.bed	derived from Suppl. Table 19 of https://doi.org/10.1038/s41586-024-07807-0
+ST19_Alterations.CNV.Recurrent_LOSS.bed	data/reference/genomic_basis_tall/ST19_Alterations.CNV.Recurrent_LOSS.bed	derived from Suppl. Table 19 of https://doi.org/10.1038/s41586-024-07807-0
+config_AnnotSV.yaml	config_AnnotSV.yaml	in-repo (project-authored knotAnnotSV column config)

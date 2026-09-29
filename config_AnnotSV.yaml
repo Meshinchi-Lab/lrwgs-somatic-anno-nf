@@ -1,0 +1,369 @@
+##############################################################################################
+# knotAnnotSV 1.1                                                                            #
+#                                                                                            #
+# knotAnnotSV: Creation of a customizable html file to visualize, filter                     # 
+#                   and analyze an AnnotSV output                                            #
+#                                                                                            #
+# Author: Thomas Guignard 2020-present                                                       #
+#                                                                                            #
+# Copyright (C) 2020-present Thomas Guignard (t-guignard@chu-montpellier.fr)                 #
+#                                                                                            #
+# This is part of knotAnnotSV source code.                                                   #
+#                                                                                            #
+# This program is free software; you can redistribute it and/or                              #
+# modify it under the terms of the GNU General Public License                                #
+# as published by the Free Software Foundation; either version 3                             #
+# of the License, or (at your option) any later version.                                     #
+#                                                                                            #
+# This program is distributed in the hope that it will be useful,                            #
+# but WITHOUT ANY WARRANTY; without even the implied warranty of                             #
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the                              #
+# GNU General Public License for more details.                                               #
+#                                                                                            #
+# You should have received a copy of the GNU General Public License                          #
+# along with this program; If not, see <http://www.gnu.org/licenses/>.                       #
+##############################################################################################
+---
+#### General annotations on the SV
+##################################
+AnnotSV_ID:    #mandatory in first position
+    POSITION: 1
+    RENAME: "AnnotSV ID"
+### CytoBand — chromosomal location of the SV (UCSC cytogenetic band)
+######################################################################
+CytoBand:
+    POSITION: 2
+    RENAME: "CytoBand"
+    HEADERTIPS: "UCSC cytogenetic band overlapped by the SV (e.g. 21q22.12). Useful chromosome-context anchor right after the AnnotSV ID."
+### Caller variant ID and ALT allele
+######################################
+# `ID` is the original SV caller's variant identifier (Severus / SAVANA /
+# MINDA), copied through from the input VCF. Pairs naturally with CytoBand
+# as a per-record handle to grep / cross-reference against caller logs.
+# `ALT` is the symbolic allele notation written by ADD_CALLER:
+#   - non-BND records: `<DEL>` / `<DUP>` / `<INS>` / `<INV>` (the literal
+#     inserted sequence is replaced for INS so the table stays readable)
+#   - BND records: bracket notation `N[chrX:Y[` / `[chrX:Y[N` / etc., which
+#     carries the partner-breakpoint coordinate inline.
+ID:
+    POSITION: 3
+    RENAME: "Caller ID"
+    HEADERTIPS: "Original variant ID from the SV caller (e.g. severus_DEL3960). Carried through from the input VCF; useful for back-referencing the raw caller output."
+ALT:
+    POSITION: 4
+    RENAME: "ALT"
+    HEADERTIPS: "Alternate allele in VCF notation. Symbolic (`<DEL>`, `<DUP>`, `<INS>`, `<INV>`) for non-BND records; bracket notation `N[chrX:Y[` / `[chrX:Y[N` / `N]chrX:Y]` / `]chrX:Y]N` for BND records, which encodes the partner-breakpoint coordinate."
+
+ACMG_class:  # mandatory   
+    POSITION: 5
+    RENAME: "ACMG class"
+    HEADERTIPS: "SV ranking class (from 1 to 5) following the 2020 joint consensus recommendation of ACMG and ClinGen"
+    COMMENTLIST:
+        - AnnotSV_ranking_score
+        - AnnotSV_ranking_criteria
+SV_type:
+    POSITION: 6
+    RENAME: "SV type"
+    HEADERTIPS: "Type of the SV (DEL, DUP...)"
+    COMMENTLIST:
+        - SV_length
+        - Gene_count
+
+Annotation_mode: #mandatory
+    POSITION: 7
+    RENAME: "Annotation mode"
+    HEADERTIPS: "Type of annotation lines generated:<br>
+- annotation on the SV full length (full)<br>
+- annotation on each gene overlapped by the SV (split)"
+
+### Gene annotations
+####################
+Gene_name:     # mandatory
+    POSITION: 8
+    RENAME: "Gene name"
+    HEADERTIPS: "Gene symbol"
+    COMMENTLIST:
+        - LOEUF_bin
+        - GnomAD_pLI
+        - ExAC_pLI
+        - HI
+        - TS
+        - DDD_HI_percent
+        - ACMG
+        - ExAC_cnvZ
+        - ExAC_delZ
+        - ExAC_dupZ
+        - ExAC_synZ
+        - ExAC_misZ
+        - GenCC_disease
+        - GenCC_moi
+        - GenCC_classification
+        - GenCC_pmid
+        - Closest_left
+        - Closest_right
+        - NCBI_gene_ID
+Location:
+    POSITION: 10
+    RENAME: "Location"
+    HEADERTIPS: "Hover your mouse to highlight SV location annotations in the gene"
+    COMMENTLIST:
+        - CytoBand
+        - Location2
+        - Tx
+        - Tx_version
+        - Tx_start
+        - Tx_end
+        - Exon_count
+        - Overlapped_tx_length
+        - Overlapped_CDS_length
+        - Overlapped_CDS_percent
+        - Frameshift
+        - Dist_nearest_SS
+        - Nearest_SS_type
+        - Intersect_start
+        - Intersect_end
+OMIM_ID:
+    POSITION: 11
+    RENAME: "OMIM ID"
+    HEADERTIPS: "Hover your mouse to highlight OMIM annotations"
+    COMMENTLIST:
+        - OMIM_phenotype
+        - OMIM_inheritance
+        - OMIM_morbid
+        - OMIM_morbid_candidate
+Exomiser_gene_pheno_score:
+    POSITION: 12
+    RENAME: "Exomiser score"
+    HEADERTIPS: "Show how close each overlapped gene is to the patient phenotype<br>
+    Highly specific and consistent phenotype: score > 0.7<br>
+    Consistent phenotype: score > 0.5"
+    COMMENTLIST:
+        - Human_pheno_evidence
+        - Mouse_pheno_evidence
+        - Fish_pheno_evidence
+PhenoGenius_specificity:
+    POSITION: 13
+    RENAME: "PhenoGenius specificity"
+    HEADERTIPS: "Phenotype specificity into one of A, B, C, D or . :<br>
+    A - Highly specific and relatively unique to the gene<br>
+    B - Consistent with the gene, highly specific, but not necessarily unique to the gene<br>
+    C - Limited association with the gene, not highly specific and/or with high genetic heterogeneity<br>
+    D - Not consistent with what is expected for the gene/genomic region or not consistent in general<br>
+    . - No reported phenotype"
+    COMMENTLIST:
+    - PhenoGenius_phenotype
+    - PhenoGenius_score
+
+### Annotations done with regulatory elements
+#############################################
+RE_gene:
+    POSITION: 14
+    RENAME: "Overlapped regulatory elements"
+    HEADERTIPS: "Report the name of the genes potentially badly regulated"
+Gene_count:
+    POSITION: 9
+    RENAME: "Gene count"
+    HEADERTIPS: "Number of genes overlapped by the SV (AnnotSV Gene_count). Pairs with Gene_name for an at-a-glance breadth-of-impact cue."
+
+### Annotations done with pathogenic SV
+#######################################
+P_gain_coord:
+    POSITION: 15
+    RENAME: "Pathogenic SV"
+    HEADERTIPS: "Known pathogenic genes or genomic regions (with the same SV type; from ClinVar, ClinGen, dbVar, OMIM) completely overlapped with the SV to annotate"
+    COMMENTLIST:
+        - P_gain_source
+        - P_gain_phen
+        - P_gain_hpo
+        - P_loss_coord
+        - P_loss_source
+        - P_loss_phen
+        - P_loss_hpo
+        - po_P_gain_phen
+        - po_P_gain_hpo
+        - po_P_gain_source
+        - po_P_gain_coord
+        - po_P_gain_percent
+        - po_P_loss_phen
+        - po_P_loss_hpo
+        - po_P_loss_source
+        - po_P_loss_coord
+        - po_P_loss_percent
+
+### Annotations done with pathogenic snv/indel
+##############################################
+P_snvindel_nb:
+    POSITION: 16
+    RENAME: "Number of pathogenic SNV/indel overlapped"
+    HEADERTIPS: "Pathogenic SNV/indel (from ClinVar) completely overlapped with the SV to annotate"
+    COMMENTLIST:
+        - P_snvindel_phen
+
+### Annotations done with benign SV
+###################################
+B_gain_source:
+    POSITION: 17
+    RENAME: "Benign SV"
+    HEADERTIPS: "Benign genomic regions (with the same SV type; from gnomAD, ClinVar, ClinGen, DGV, DDD, 1000g, IMH) completely overlapping the SV to annotate"
+    COMMENTLIST:
+        - B_gain_coord
+        - B_gain_AFmax
+        - B_loss_source
+        - B_loss_coord
+        - B_loss_AFmax
+        - po_B_gain_allG_source
+        - po_B_gain_allG_coord
+        - po_B_gain_someG_source
+        - po_B_gain_someG_coord
+        - po_B_loss_allG_source
+        - po_B_loss_allG_coord
+        - po_B_loss_someG_source
+        - po_B_loss_someG_coord
+
+### Annotations of the breakpoints
+##################################
+ENCODE_blacklist_characteristics_left:
+    POSITION: 18
+    RENAME: "Left breakpoint annotations"
+    HEADERTIPS: "Hover your mouse to highlight the left SV breakpoint (+/- 100bp) annotations"
+    COMMENTLIST:
+        - ENCODE_blacklist_left
+        - SegDup_left
+        - Repeat_coord_left
+        - Repeat_type_left
+        - Gap_left
+        - GC_content_left
+
+ENCODE_blacklist_characteristics_right:
+    POSITION: 19
+    RENAME: "Right breakpoint annotations"
+    HEADERTIPS: "Hover your mouse to highlight the right SV breakpoint (+/- 100bp) annotations"
+    COMMENTLIST:
+        - ENCODE_blacklist_right
+        - SegDup_right
+        - Repeat_coord_right
+        - Repeat_type_right
+        - Gap_right
+        - GC_content_right
+
+TAD_coordinate:
+    POSITION: 0
+ENCODE_experiment:
+    POSITION: 0
+Cosmic_ID:
+    POSITION: 0
+Cosmic_mut_typ:
+    POSITION: 0
+Compound-htz(sample):
+    POSITION: 0
+Count_hom(sample):
+    POSITION: 0
+Count_htz(sample):
+    POSITION: 0
+Count_htz/allHom(sample):
+    POSITION: 0
+Count_htz/total(cohort):
+    POSITION: 0
+Count_total(cohort):
+    POSITION: 0
+
+### Caller provenance
+#####################
+# CALLER is merged into the AnnotSV TSV by the ADD_CALLER process, which
+# extracts the VCF INFO/CALLER field via vembrane/table on the merged VCF
+# and joins it to the AnnotSV TSV by ID.  This replaces AnnotSV's bloated
+# full-INFO column (kept out of the report by setting INFO POSITION: 0).
+CALLER:
+    POSITION: 20
+    RENAME: "Caller"
+    HEADERTIPS: "Variant caller: SEVERUS, SAVANA, or MINDA (consensus of both)"
+
+### Per-sample read support — joined into the AnnotSV TSV by ADD_CALLER
+########################################################################
+# vembrane/table extracts FORMAT[VAF|hVAF|DR|DV][SAMPLE] from the merged
+# VCF; add_caller.py left-joins it onto the AnnotSV TSV by ID. These four
+# fields are critical clinical context (allelic burden + read support)
+# that AnnotSV does not surface itself.
+VAF:
+    POSITION: 21
+    RENAME: "VAF"
+    HEADERTIPS: "Variant allele frequency (fraction of reads supporting the SV at this breakpoint). Severus/SAVANA FORMAT/VAF."
+hVAF:
+    POSITION: 22
+    RENAME: "hVAF (H0,H1,H2)"
+    HEADERTIPS: "Haplotype-specific VAF as (unphased, HP1, HP2). Useful for confirming somatic SVs sit on one haplotype."
+DR:
+    POSITION: 23
+    RENAME: "DR (ref reads)"
+    HEADERTIPS: "Reference-supporting read depth at the breakpoint (FORMAT/DR)."
+DV:
+    POSITION: 24
+    RENAME: "DV (alt reads)"
+    HEADERTIPS: "Variant-supporting read depth at the breakpoint (FORMAT/DV)."
+
+INFO:
+    POSITION: 0
+
+### Candidate cancer gene annotations
+######################################
+# Computed by ADD_CALLER (bin/add_caller.py) as the intersection of each
+# row's `Gene_name` (the ';'-separated list of all genes overlapped by the
+# SV) with the user's candidate-gene list (params.candidateGenesFile —
+# e.g. ST9.alterations_OncoKB_cancer_genes.txt). AnnotSV's own
+# -candidateGenesFile flag only adjusts the AnnotSV_ranking_score; it does
+# NOT emit a per-row list of which candidate genes the SV overlaps. This
+# column fills that gap so the report shows the actual T-ALL driver hits.
+Candidate_genes:
+    POSITION: 25
+    RENAME: "Candidate cancer genes"
+    HEADERTIPS: "Subset of `Gene_name` that intersects the user-supplied candidate-gene list (params.candidateGenesFile). Empty when no candidate gene is overlapped by the SV's coordinate interval."
+
+### User-defined SV alteration annotations — ST17 BED overlap
+###############################################################
+# Each BED file passed to AnnotSV via -FtIncludedInSV / -AnyOverlap
+# produces three TSV columns prefixed with the column name from the BED
+# header line: name_<basename>, score_<basename>, strand_<basename>. The
+# primary column knotAnnotSV renders is name_<basename>; score_ and strand_
+# are surfaced in the tooltip via COMMENTLIST.
+# BND lives in AnyOverlap (breakends rarely fully overlap a region);
+# DEL/DUP/INS/INV live in FtIncludedInSV.
+name_ST17_Alterations.SV.All_BND:
+    POSITION: 26
+    RENAME: "ST17 BND overlap"
+    HEADERTIPS: "Overlapping ST17 BND alteration region (AnyOverlap)"
+    COMMENTLIST:
+        - score_ST17_Alterations.SV.All_BND
+        - strand_ST17_Alterations.SV.All_BND
+
+name_ST17_Alterations.SV.All_DEL:
+    POSITION: 27
+    RENAME: "ST17 DEL overlap"
+    HEADERTIPS: "Overlapping ST17 DEL alteration region (FtIncludedInSV)"
+    COMMENTLIST:
+        - score_ST17_Alterations.SV.All_DEL
+        - strand_ST17_Alterations.SV.All_DEL
+
+name_ST17_Alterations.SV.All_DUP:
+    POSITION: 28
+    RENAME: "ST17 DUP overlap"
+    HEADERTIPS: "Overlapping ST17 DUP alteration region (FtIncludedInSV)"
+    COMMENTLIST:
+        - score_ST17_Alterations.SV.All_DUP
+        - strand_ST17_Alterations.SV.All_DUP
+
+name_ST17_Alterations.SV.All_INS:
+    POSITION: 29
+    RENAME: "ST17 INS overlap"
+    HEADERTIPS: "Overlapping ST17 INS alteration region (FtIncludedInSV)"
+    COMMENTLIST:
+        - score_ST17_Alterations.SV.All_INS
+        - strand_ST17_Alterations.SV.All_INS
+
+name_ST17_Alterations.SV.All_INV:
+    POSITION: 30
+    RENAME: "ST17 INV overlap"
+    HEADERTIPS: "Overlapping ST17 INV alteration region (FtIncludedInSV)"
+    COMMENTLIST:
+        - score_ST17_Alterations.SV.All_INV
+        - strand_ST17_Alterations.SV.All_INV
+

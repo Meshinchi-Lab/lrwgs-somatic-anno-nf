@@ -1,0 +1,3 @@
+id,bam,severus_sv,savana_sv,wahkan_cnv,clairsto_snv,deepsomatic_snv
+SAMPLE_1,/path/to/SAMPLE_1.haplotagged.bam,/path/to/SAMPLE_1.severus_somatic.vcf.gz,,/path/to/SAMPLE_1.wakhan_cna.vcf.gz,/path/to/SAMPLE_1.wf-somatic-snv.vcf.gz,/path/to/SAMPLE_1.deepsomatic.vcf.gz
+SAMPLE_2,/path/to/SAMPLE_2.haplotagged.bam,/path/to/SAMPLE_2.severus_somatic.vcf.gz,/path/to/SAMPLE_2.savana.classified.somatic.vcf,/path/to/SAMPLE_2.wakhan_cna.vcf.gz,/path/to/SAMPLE_2.wf-somatic-snv.vcf.gz,/path/to/SAMPLE_2.deepsomatic.vcf.gz

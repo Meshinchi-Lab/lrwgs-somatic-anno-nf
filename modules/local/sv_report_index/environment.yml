@@ -1,0 +1,16 @@
+name: null
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - quarto=1.6.39
+  - r-base=4.4
+  - r-tidyverse=2.0.0
+  - r-knitr=1.49
+  - r-rmarkdown=2.29
+  - r-dt=0.33
+  - r-plotly
+  - r-jsonlite
+  - r-htmltools
+  - bioconductor-ensembldb
+  - bioconductor-plyranges

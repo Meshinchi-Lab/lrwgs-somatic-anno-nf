@@ -1,0 +1,122 @@
+{
+    "one VCF - files": {
+        "content": [
+            "test.db",
+            {
+                "versions_svdb": [
+                    [
+                        "SVDB_BUILD",
+                        "svdb",
+                        "2.8.4"
+                    ]
+                ]
+            }
+        ],
+        "meta": {
+            "nf-test": "0.9.3",
+            "nextflow": "25.10.4"
+        },
+        "timestamp": "2026-03-03T09:17:03.930549638"
+    },
+    "two VCFs - files": {
+        "content": [
+            "test.db",
+            {
+                "versions_svdb": [
+                    [
+                        "SVDB_BUILD",
+                        "svdb",
+                        "2.8.4"
+                    ]
+                ]
+            }
+        ],
+        "meta": {
+            "nf-test": "0.9.3",
+            "nextflow": "25.10.4"
+        },
+        "timestamp": "2026-03-03T09:17:13.776049621"
+    },
+    "two VCFs - files -stub": {
+        "content": [
+            {
+                "0": [
+                    [
+                        {
+                            "id": "test"
+                        },
+                        "test.db:md5,d41d8cd98f00b204e9800998ecf8427e"
+                    ]
+                ],
+                "1": [
+                    [
+                        "SVDB_BUILD",
+                        "svdb",
+                        "2.8.4"
+                    ]
+                ],
+                "db": [
+                    [
+                        {
+                            "id": "test"
+                        },
+                        "test.db:md5,d41d8cd98f00b204e9800998ecf8427e"
+                    ]
+                ],
+                "versions_svdb": [
+                    [
+                        "SVDB_BUILD",
+                        "svdb",
+                        "2.8.4"
+                    ]
+                ]
+            }
+        ],
+        "meta": {
+            "nf-test": "0.9.3",
+            "nextflow": "25.10.4"
+        },
+        "timestamp": "2026-03-03T09:17:34.614834221"
+    },
+    "one VCF - files -stub": {
+        "content": [
+            {
+                "0": [
+                    [
+                        {
+                            "id": "test"
+                        },
+                        "test.db:md5,d41d8cd98f00b204e9800998ecf8427e"
+                    ]
+                ],
+                "1": [
+                    [
+                        "SVDB_BUILD",
+                        "svdb",
+                        "2.8.4"
+                    ]
+                ],
+                "db": [
+                    [
+                        {
+                            "id": "test"
+                        },
+                        "test.db:md5,d41d8cd98f00b204e9800998ecf8427e"
+                    ]
+                ],
+                "versions_svdb": [
+                    [
+                        "SVDB_BUILD",
+                        "svdb",
+                        "2.8.4"
+                    ]
+                ]
+            }
+        ],
+        "meta": {
+            "nf-test": "0.9.3",
+            "nextflow": "25.10.4"
+        },
+        "timestamp": "2026-03-03T09:17:23.906936882"
+    }
+}

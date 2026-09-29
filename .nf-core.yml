@@ -1,0 +1,68 @@
+repository_type: pipeline
+
+nf_core_version: 4.0.1
+
+lint:
+  files_unchanged:
+    - docs/CONTRIBUTING.md
+    - .prettierignore
+    - .prettierignore
+    - CODE_OF_CONDUCT.md
+    - assets/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
+    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
+    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_dark.png
+    - .github/ISSUE_TEMPLATE/bug_report.yml
+    - .github/PULL_REQUEST_TEMPLATE.md
+    - assets/email_template.txt
+    - docs/README.md
+  nextflow_config:
+    - manifest.name
+    - manifest.homePage
+    - process.cpus
+    - process.memory
+    - process.time
+    - custom_config
+    - params.custom_config_version
+    - params.custom_config_base
+  multiqc_config:
+    - report_comment
+  files_exist:
+    - assets/email_template.html
+    - assets/sendmail_template.txt
+    - assets/email_template.txt
+    - CODE_OF_CONDUCT.md
+    - assets/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
+    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
+    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_dark.png
+    - .github/ISSUE_TEMPLATE/config.yml
+    - .github/workflows/awstest.yml
+    - .github/workflows/awsfulltest.yml
+    - .github/workflows/branch.yml
+    - .github/workflows/nf-test.yml
+    - .github/actions/get-shards/action.yml
+    - .github/actions/nf-test/action.yml
+    - .github/workflows/linting_comment.yml
+    - .github/workflows/linting.yml
+    - conf/igenomes.config
+  included_configs: false
+
+template:
+  org: Meshinchi-Lab
+  name: 2026-04-30_WGS_Nanopore_variantCallingAnno
+  description: A pipeline to merge multiple sources of SVs, CNVs, and SNVs and annotate
+    them with known and custom reference DBs.
+  author: Jenny L. Smith
+  version: 1.0.0dev
+  force: true
+  outdir: .
+  skip_features:
+    - ci
+    - fastqc
+    - nf_core_configs
+    - seqera_platform
+    - gpu
+    - codespaces
+    - vscode
+    - rocrate
+    - email
+  is_nfcore: false
