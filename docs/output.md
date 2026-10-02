@@ -1,4 +1,4 @@
-# Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno: Output
+# Meshinchi-Lab/lrwgs-somatic-anno-nf: Output
 
 ## Introduction
 

@@ -1,4 +1,4 @@
-# Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno: Citations
+# Meshinchi-Lab/lrwgs-somatic-anno-nf: Citations
 
 ## [nf-core](https://pubmed.ncbi.nlm.nih.gov/32055031/)
 

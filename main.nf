@@ -1,9 +1,9 @@
 #!/usr/bin/env nextflow
 /*
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-wgs_nanopore_variantcallinganno
+lrwgs-somatic-anno-nf
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Github : https://github.com/Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno
+    Github : https://github.com/Meshinchi-Lab/lrwgs-somatic-anno-nf
 ----------------------------------------------------------------------------------------
 */
 

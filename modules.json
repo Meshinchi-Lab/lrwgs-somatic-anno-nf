@@ -1,6 +1,6 @@
 {
-    "name": "Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno",
-    "homePage": "https://github.com/Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno",
+    "name": "Meshinchi-Lab/lrwgs-somatic-anno-nf",
+    "homePage": "https://github.com/Meshinchi-Lab/lrwgs-somatic-anno-nf",
     "repos": {
         "https://github.com/nf-core/modules.git": {
             "modules": {

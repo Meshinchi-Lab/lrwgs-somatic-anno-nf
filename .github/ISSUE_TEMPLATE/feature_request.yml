@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an idea for the Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno pipeline
+description: Suggest an idea for the Meshinchi-Lab/lrwgs-somatic-anno-nf pipeline
 labels: enhancement
 body:
   - type: textarea

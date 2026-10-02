@@ -1,11 +1,11 @@
-# Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno: Changelog
+# Meshinchi-Lab/lrwgs-somatic-anno-nf: Changelog
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## v1.0.0dev - [date]
 
-Initial release of Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno, created with the [nf-core](https://nf-co.re/) template.
+Initial release of Meshinchi-Lab/lrwgs-somatic-anno-nf, created with the [nf-core](https://nf-co.re/) template.
 
 ### `Added`
 

@@ -483,7 +483,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
         .mix(topic_versions_string)
         .collectFile(
             storeDir: "${outdir}/pipeline_info",
-            name:  '2026-04-30_wgs_nanopore_variantcallinganno_software_'  + 'mqc_'  + 'versions.yml',
+            name:  'lrwgs-somatic-anno-nf_software_'  + 'mqc_'  + 'versions.yml',
             sort: true,
             newLine: true
         )
@@ -503,7 +503,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     MULTIQC(
         ch_multiqc_files.flatten().collect().map { files ->
             [
-                [id: '2026-04-30_wgs_nanopore_variantcallinganno'],
+                [id: 'lrwgs-somatic-anno-nf'],
                 files,
                 multiqc_config
                     ? file(multiqc_config, checkIfExists: true)

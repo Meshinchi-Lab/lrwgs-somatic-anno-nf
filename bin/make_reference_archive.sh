@@ -176,7 +176,7 @@ Extract at the **repository root** — the archives store repo-relative paths, s
 every file lands where `nextflow.config` expects it.
 
 ```bash
-cd /path/to/2026-04-30_WGS_Nanopore_Annotation_T-ALL
+cd /path/to/lrwgs-somatic-anno-nf
 
 # verify first
 shasum -a 256 -c SHA256SUMS.*.txt

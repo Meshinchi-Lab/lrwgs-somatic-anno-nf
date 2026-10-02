@@ -8,9 +8,9 @@ lint:
     - .prettierignore
     - .prettierignore
     - CODE_OF_CONDUCT.md
-    - assets/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
-    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
-    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_dark.png
+    - assets/nf-core-lrwgs-somatic-anno-nf_logo_light.png
+    - docs/images/nf-core-lrwgs-somatic-anno-nf_logo_light.png
+    - docs/images/nf-core-lrwgs-somatic-anno-nf_logo_dark.png
     - .github/ISSUE_TEMPLATE/bug_report.yml
     - .github/PULL_REQUEST_TEMPLATE.md
     - assets/email_template.txt
@@ -31,9 +31,9 @@ lint:
     - assets/sendmail_template.txt
     - assets/email_template.txt
     - CODE_OF_CONDUCT.md
-    - assets/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
-    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_light.png
-    - docs/images/nf-core-2026-04-30_wgs_nanopore_variantcallinganno_logo_dark.png
+    - assets/nf-core-lrwgs-somatic-anno-nf_logo_light.png
+    - docs/images/nf-core-lrwgs-somatic-anno-nf_logo_light.png
+    - docs/images/nf-core-lrwgs-somatic-anno-nf_logo_dark.png
     - .github/ISSUE_TEMPLATE/config.yml
     - .github/workflows/awstest.yml
     - .github/workflows/awsfulltest.yml

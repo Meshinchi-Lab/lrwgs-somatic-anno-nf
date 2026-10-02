@@ -1,7 +1,7 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://raw.githubusercontent.com/Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno/master/assets/schema_input.json",
-    "title": "Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno pipeline - params.input schema",
+    "$id": "https://raw.githubusercontent.com/Meshinchi-Lab/lrwgs-somatic-anno-nf/master/assets/schema_input.json",
+    "title": "Meshinchi-Lab/lrwgs-somatic-anno-nf pipeline - params.input schema",
     "description": "Schema for the samplesheet provided with params.input. One row per sample; each row supplies the haplotagged BAM plus the upstream SV, CNA and SNV VCFs that this pipeline merges and annotates. Columns are consumed in subworkflows/local/utils_nfcore_nanopore_variant_calling_anno/main.nf.",
     "type": "array",
     "items": {
@@ -32,7 +32,7 @@
                 "format": "file-path",
                 "exists": true,
                 "pattern": "^\\S+\\.vcf(\\.gz)?$",
-                "errorMessage": "SAVANA SV VCF must have extension '.vcf' or '.vcf.gz'. This column is OPTIONAL: leave the value empty (or omit the column) to run the SAVANA process instead of supplying a pre-computed VCF."
+                "errorMessage": "SAVANA SV VCF must have extension '.vcf' or '.vcf.gz'. This column is OPTIONAL: leave the value empty, write NA (any case), or omit the column entirely to run the SAVANA process instead of supplying a pre-computed VCF."
             },
             "wahkan_cnv": {
                 "type": "string",

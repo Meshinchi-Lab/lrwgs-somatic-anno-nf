@@ -112,7 +112,7 @@ RUN quarto --version
 # and GHCR uses exactly that label to decide which repository a package links
 # to. Leave it inherited and the package is filed against rocker's repo instead
 # of ours: it will not appear in this repository's Packages sidebar.
-ARG IMAGE_SOURCE=https://github.com/meshinchi-lab/2026-04-30_WGS_Nanopore_Annotation_T-ALL
+ARG IMAGE_SOURCE=https://github.com/meshinchi-lab/lrwgs-somatic-anno-nf
 ARG IMAGE_VERSION=2026.09
 LABEL org.opencontainers.image.source="${IMAGE_SOURCE}" \
       org.opencontainers.image.url="${IMAGE_SOURCE}" \

@@ -1,7 +1,7 @@
 {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://raw.githubusercontent.com/Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno/master/nextflow_schema.json",
-    "title": "Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno pipeline parameters",
+    "$id": "https://raw.githubusercontent.com/Meshinchi-Lab/lrwgs-somatic-anno-nf/master/nextflow_schema.json",
+    "title": "Meshinchi-Lab/lrwgs-somatic-anno-nf pipeline parameters",
     "description": "A pipeline to merge multiple sources of SVs, CNVs, and SNVs and annotate them with known and custom reference DBs.",
     "type": "object",
     "$defs": {

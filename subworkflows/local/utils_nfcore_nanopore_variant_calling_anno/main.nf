@@ -87,15 +87,24 @@ workflow PIPELINE_INITIALISATION {
 
     // Create channel from input file provided through params.input
     //
-    // Optional `savana_sv` column: when present with a non-empty path the row
-    // supplies a pre-computed SAVANA VCF; the workflow uses it directly and
-    // skips the SAVANA process. Absent column or empty value = run SAVANA.
+    // Optional `savana_sv` column: when present with a real path the row supplies
+    // a pre-computed SAVANA VCF; the workflow uses it directly and skips the
+    // SAVANA process. Absent column, empty value, or "NA" = run SAVANA.
     Channel.fromPath(file(params.input, checkIfExists: true))
         .splitCsv(header: true, sep: ',',  skip: 0)
         .map { sample_info ->
+                // Treat empty, whitespace-only and the literal "NA" (any case) as
+                // "no SAVANA VCF supplied" -> run the SAVANA process instead.
+                // R/pandas write NA for a blank cell, so a samplesheet round-tripped
+                // through either lands here as the STRING "NA", which the previous
+                // emptiness-only check accepted as a real path and then died in
+                // file(..., checkIfExists: true).
+                // savana_str (trimmed) is what gets passed to file(), not savana_raw --
+                // a trailing space in the CSV would otherwise break path resolution.
                 def savana_raw  = sample_info["savana_sv"]
-                def has_savana  = savana_raw != null && savana_raw.toString().trim() != ""
-                def savana_file = has_savana ? file(savana_raw, checkIfExists: true) : []
+                def savana_str  = savana_raw?.toString()?.trim() ?: ""
+                def has_savana  = savana_str != "" && savana_str.toUpperCase() != "NA"
+                def savana_file = has_savana ? file(savana_str, checkIfExists: true) : []
                 [   "meta": [ "id":sample_info["id"], "has_savana": has_savana ],
                     "svs": [ file(sample_info["bam"], checkIfExists: true), file( "${sample_info['bam']}.bai", checkIfExists: true), file(sample_info["severus_sv"], checkIfExists: true), savana_file ],
                     "cnvs": [file(sample_info["wahkan_cnv"], checkIfExists: true) ],

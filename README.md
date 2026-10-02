@@ -256,7 +256,7 @@ SAMPLE1,sample1.bam,sample1.bam.bai,sample1.severus.vcf.gz,sample1.savana.vcf.gz
 ### Minimal run
 
 ```bash
-nextflow run Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno \
+nextflow run Meshinchi-Lab/lrwgs-somatic-anno-nf \
     -profile docker \
     --input samplesheet.csv \
     --outdir results

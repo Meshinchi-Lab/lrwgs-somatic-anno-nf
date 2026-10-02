@@ -1,6 +1,6 @@
-# Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno: Documentation
+# Meshinchi-Lab/lrwgs-somatic-anno-nf: Documentation
 
-The Meshinchi-Lab/2026-04-30_wgs_nanopore_variantcallinganno documentation is split into the following pages:
+The Meshinchi-Lab/lrwgs-somatic-anno-nf documentation is split into the following pages:
 
 - [Usage](usage.md)
   - An overview of how the pipeline works, how to run it and a description of all of the different command-line flags.
