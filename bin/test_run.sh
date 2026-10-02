@@ -1,11 +1,14 @@
 #!/bin/bash
 
-set -eou pipefail 
+set -eou pipefail
 
-export NXF_VER=25.10.0
-nextflow -v 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/_nextflow_pinned.sh
+. "$SCRIPT_DIR/_nextflow_pinned.sh"
 
-nextflow \
+"$NXF_CMD" -v
+
+"$NXF_CMD" \
     -log reports/pipeline.log \
     run main.nf \
     -profile test,docker,emulate_amd64 \
@@ -14,4 +17,3 @@ nextflow \
     -cache true \
     -resume \
     -latest
-
