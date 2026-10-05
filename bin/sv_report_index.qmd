@@ -1478,8 +1478,9 @@ if (all(c("CHROM", "CytoBand") %in% names(pass2_clean))) {
 # params$ensembl_db is unset OR the file doesn't exist. Handles contigs
 # that aren't in the EnsDb (chrUn_*, alt scaffolds, decoys) by filling
 # `"unknown_contig:pos"` for the missing side instead of crashing the
-# whole join. Uses a single vectorized `plyranges::join_nearest` over
-# ALL breakpoints at once (no rowwise) so cost is O(N log M) not O(N * M).
+# whole join. Vectorized over ALL breakpoints at once (no rowwise) so cost is
+# O(N log M) not O(N * M): one `plyranges::join_overlap_inner` for breakpoints
+# inside a gene, then one `GenomicRanges::distanceToNearest` for the remainder.
 # Only trigger the (potentially slow) Bioc install when the EnsDb SQLite is
 # actually staged — otherwise the annotation block would skip anyway.
 if (!is.null(params$ensembl_db) && nzchar(params$ensembl_db) &&
@@ -1515,8 +1516,8 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
     if (!cc %in% names(S4Vectors::mcols(ens_genes_gr)))
       S4Vectors::mcols(ens_genes_gr)[[cc]] <- NA_character_
   }
-  # join_nearest keeps the QUERY strand ('*' from bp_in_gr), not the subject's,
-  # so the gene's own strand must travel as a metadata column.
+  # The overlap/nearest joins keep the QUERY strand ('*' from bp_in_gr), not the
+  # subject's, so the gene's own strand must travel as a metadata column.
   ens_genes_gr$gene_strand <- as.character(BiocGenerics::strand(ens_genes_gr))
   # Some EnsDb rows have empty gene_name — fall back to gene_id so the
   # annotation always has a non-empty label.
@@ -1538,7 +1539,7 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
   # SVTYPE; case (2) matches DEL/DUP/INV; case (3) matches INS or any
   # SVTYPE where END was missing / equal to POS.
   #
-  # `distance` from `join_nearest` is 0 if the anchor is inside the gene,
+  # `distance` is 0 when the anchor is INSIDE the gene (gene_source == "overlap"),
   # positive if the anchor is outside (upstream of the left anchor =
   # negative offset from gene start / downstream of the right anchor =
   # positive offset from gene end). Kept as the raw absolute distance
@@ -1606,48 +1607,115 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
 
     if (nrow(bp_in) > 0) {
       bp_in_gr <- plyranges::as_granges(bp_in)
-      # join_nearest can emit multiple rows per (ID, side) when several
-      # equidistant genes tie for nearest. Keep one row per anchor so the
-      # downstream pivot_wider produces atomic character columns instead
-      # of list-columns (which break coalesce in mlst_bnd).
-      # TIE-BREAK IS NOT COSMETIC. A breakpoint frequently falls inside more than
-      # one annotated feature, and every one has distance 0, so an unordered
-      # `distinct()` keeps whichever row sorted first. Observed 2026-09-17:
-      # chr9:131151786 lies inside BOTH NUP214 (protein_coding) and
-      # ENSG00000236986 (an unnamed lncRNA); the unordered pick took the lncRNA
-      # and mislabelled SET::NUP214 — the canonical T-ALL fusion from
-      # del(9)(q34.11q34.13) — as SET::ENSG00000236986.
+
+      # TWO-STAGE ASSIGNMENT. `join_nearest` alone is NOT usable here: plyranges
+      # documents it as returning an ARBITRARY nearest neighbour, and it offers no
+      # multi-mapping option, so when a breakpoint sits inside several features it
+      # discards the competitors BEFORE any tie-break can see them. The ordering
+      # below was never wrong — it was being handed a one-row candidate set.
       #
-      # Order before slicing: nearest, then protein_coding ahead of other
-      # biotypes, then named symbols ahead of bare ENSG ids, then tightest
-      # interval. Deterministic and biologically sensible.
-      hits <- plyranges::join_nearest(
-                bp_in_gr,
-                dplyr::select(ens_genes_gr, gene_name, canonical_transcript,
-                              gene_biotype, gene_strand),
-                distance = TRUE) |>
+      # Observed 2026-09-17, re-confirmed against EnsDb v110 on 2026-10-02:
+      # chr9:131151786 lies inside BOTH NUP214 (ENSG00000126883, protein_coding,
+      # chr9:131125573-131234663) and an unnamed lncRNA (ENSG00000236986,
+      # chr9:131132852-131167505). join_nearest returned only the lncRNA, so
+      # SET::NUP214 — the canonical T-ALL fusion from del(9)(q34.11q34.13) — was
+      # emitted as SET::ENSG00000236986.
+      #
+      # Stage 1 uses join_overlap_inner (== find_overlaps), which emits one row per
+      # (breakpoint, gene) pair, so every containing feature competes.
+      # Stage 2 handles breakpoints in gene deserts, where there is nothing to
+      # overlap, via distanceToNearest(select = "all") — the only API here that
+      # returns ALL equidistant genes rather than one arbitrary pick.
+      #
+      # LRG_gene features are dropped at source. EnsDb carries LRG duplicates of
+      # real genes (NUP214 is both ENSG00000126883 and LRG_1383 at near-identical
+      # coordinates) whose canonical_transcript is an LRG accession such as
+      # `LRG_482t1`. Those are neither RefSeq nor Ensembl, so they are rejected by
+      # the ProteinPaint svfusion spec and degrade to a featureless box.
+      ens_sel <- ens_genes_gr[
+        is.na(ens_genes_gr$gene_biotype) | ens_genes_gr$gene_biotype != "LRG_gene"]
+      ens_sel$gene_width <- BiocGenerics::width(ens_sel)
+      ens_sel <- ens_sel[, c("gene_name", "canonical_transcript",
+                             "gene_biotype", "gene_strand", "gene_width")]
+
+      # Keep one row per (ID, side): downstream pivot_wider must produce atomic
+      # character columns, not list-columns (which break coalesce in mlst_bnd).
+      # Order: nearest, then protein_coding ahead of other biotypes, then an
+      # official symbol ahead of a bare ENSG id (line ~1523 has already coalesced
+      # an empty gene_name to gene_id, so the ENSG test does fire), then the
+      # tightest gene interval LAST. Width must rank last and not earlier: the
+      # lncRNA above is 34,653 bp against NUP214's 109,090 bp, so a width-first
+      # rule actively prefers the wrong gene.
+      .pick_one <- function(df) {
+        df |>
+          dplyr::arrange(ID, side, distance,
+                         dplyr::coalesce(gene_biotype, "zzz") != "protein_coding",
+                         startsWith(gene_name, "ENSG"),
+                         gene_width) |>
+          dplyr::distinct(ID, side, .keep_all = TRUE)
+      }
+
+      # ── Stage 1: every gene CONTAINING the breakpoint ──────────────────────
+      ov <- plyranges::join_overlap_inner(bp_in_gr, ens_sel) |>
         tibble::as_tibble() |>
-        dplyr::select(ID, side, gene_name, canonical_transcript,
-                      gene_biotype, gene_strand, distance, width) |>
-        dplyr::arrange(ID, side, distance,
-                       dplyr::coalesce(gene_biotype, "zzz") != "protein_coding",
-                       startsWith(gene_name, "ENSG"),
-                       width) |>
-        dplyr::distinct(ID, side, .keep_all = TRUE) |>
-        dplyr::select(-width)
+        dplyr::mutate(distance = 0L, gene_source = "overlap",
+                      nearest_genes = NA_character_) |>
+        dplyr::select(ID, side, gene_name, canonical_transcript, gene_biotype,
+                      gene_strand, distance, gene_width, gene_source,
+                      nearest_genes)
+
+      # ── Stage 2: breakpoints with no containing gene -> ALL nearest ────────
+      .done <- paste(ov$ID, ov$side)
+      rest  <- bp_in_gr[!paste(bp_in_gr$ID, bp_in_gr$side) %in% .done]
+
+      near <- ov[0, ]
+      if (length(rest) > 0) {
+        h <- GenomicRanges::distanceToNearest(rest, ens_sel, select = "all",
+                                              ignore.strand = TRUE)
+        if (length(h) > 0) {
+          qi <- S4Vectors::queryHits(h); si <- S4Vectors::subjectHits(h)
+          near <- tibble::tibble(
+            ID                   = rest$ID[qi],
+            side                 = rest$side[qi],
+            gene_name            = ens_sel$gene_name[si],
+            canonical_transcript = ens_sel$canonical_transcript[si],
+            gene_biotype         = ens_sel$gene_biotype[si],
+            gene_strand          = ens_sel$gene_strand[si],
+            distance             = S4Vectors::mcols(h)$distance,
+            gene_width           = ens_sel$gene_width[si],
+            gene_source          = "nearest") |>
+            # Report EVERY nearest gene, not just the one that wins the
+            # tie-break: an intergenic breakpoint is only interpretable with its
+            # flanking context. The primary columns stay atomic for pivot_wider;
+            # this collapsed string is the full picture for the report.
+            dplyr::group_by(ID, side) |>
+            dplyr::mutate(nearest_genes = paste0(
+              paste(sort(unique(gene_name)), collapse = ", "),
+              " (", dplyr::first(distance), " bp)")) |>
+            dplyr::ungroup()
+        }
+      }
+
+      hits <- .pick_one(dplyr::bind_rows(ov, near)) |>
+        dplyr::select(-gene_width)
     } else hits <- tibble::tibble(ID = character(), side = character(),
                                     gene_name = character(),
                                     canonical_transcript = character(),
                                     gene_biotype = character(),
                                     gene_strand = character(),
+                                    gene_source = character(),
+                                    nearest_genes = character(),
                                     distance = integer())
 
     bp_out_hits <- bp_out |>
       dplyr::mutate(canonical_transcript = NA_character_,
                     gene_biotype         = NA_character_,
-                    gene_strand          = NA_character_) |>
+                    gene_strand          = NA_character_,
+                    gene_source          = "unknown_contig",
+                    nearest_genes        = NA_character_) |>
       dplyr::select(ID, side, gene_name, canonical_transcript,
-                    gene_biotype, gene_strand, distance)
+                    gene_biotype, gene_strand, distance, gene_source,
+                    nearest_genes)
     all_hits <- dplyr::bind_rows(hits, bp_out_hits)
 
     # Every record now has a `left` and a `right` row (see bp_split
@@ -1659,7 +1727,8 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
       tidyr::pivot_wider(id_cols     = ID,
                          names_from  = side,
                          values_from = c(gene_name, canonical_transcript,
-                                         gene_strand, distance),
+                                         gene_strand, distance, gene_source,
+                                         nearest_genes),
                          names_glue  = "{.value}_{side}")
 
     pass2_clean <- pass2_clean |>

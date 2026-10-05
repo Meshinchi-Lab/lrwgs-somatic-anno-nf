@@ -11,7 +11,7 @@ null/
 .lineage/
 reports/*
 !reports/.gitkeep
-superpowers/
+superpowers
 pytest*
 __init__.py
 __pycache__*
@@ -27,3 +27,4 @@ venv/
 .playwright-mcp
 *history.md
 reports/
+prune*.sh
