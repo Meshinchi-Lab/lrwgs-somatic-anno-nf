@@ -4,36 +4,37 @@
 # ---------------
 # `bin/sv_report_index.qmd` previously installed DT, plotly, ensembldb and
 # plyranges at render time. That puts an outbound network dependency on the
-# critical path of every report, on a compute node. It failed on 2026-09-17:
-#
-#   Warning: unable to access index for repository https://cloud.r-project.org/src/contrib:
-#       cannot open URL '.../PACKAGES'
-#   Error in `library()`: ! there is no package called 'DT'
-#
-# Baking the packages in removes that dependency entirely. The qmd's
-# `install_if_missing()` / `install_bioc_if_missing()` helpers become no-ops
-# (they short-circuit on `requireNamespace()`), so no qmd change is required
-# to adopt this image — and they remain as a fallback if someone runs the
-# report against plain rocker/verse.
+# critical path of every report, on a compute node. 
 #
 # BUILD
 # -----
-#   docker build -t <registry>/tall-sv-report:4.6.1-v1 containers/sv_report_index
-#   docker push   <registry>/tall-sv-report:4.6.1-v1
+# From the repository root. The two --build-arg values stamp provenance labels;
+# --provenance/--sbom attach BuildKit attestations so the public package carries
+# a verifiable record of what was built and from which context.
 #
-# PLATFORM: rocker/verse:4.6.1 publishes linux/amd64 ONLY (verified via
-# `docker manifest inspect` 2026-09-17 - there is no arm64 manifest). The FROM
-# below pins it so a build on Apple Silicon fails fast with a clear reason
-# rather than "no match for platform in manifest". Building on an arm64 host
-# therefore emulates; the target OPBG cluster is x86 so the produced image is
-# native there. Expect emulated builds to be slow.
+#   docker build --check docker/sv_report_index          # Dockerfile lint, no build
+#   docker build \
+#     --build-arg IMAGE_REVISION="$(git rev-parse HEAD)" \
+#     --build-arg IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+#     --provenance=true --sbom=true \
+#     -t ghcr.io/meshinchi-lab/sv_report_index:2026.10 \
+#     docker/sv_report_index
+#   docker push ghcr.io/meshinchi-lab/sv_report_index:2026.10
+#
+# The build context is this directory only. Its .dockerignore admits nothing
+# but the Dockerfile and install_pkgs.R (it applies only when this directory
+# is the context). A repo-root context (`-f docker/sv_report_index/Dockerfile .`)
+# is also safe, for a different reason: `COPY install_pkgs.R` then fails, so the
+# build cannot complete with data/, results/ or work/ in reach.
+#
+# PLATFORM: rocker/verse:4.6.1 publishes linux/amd64 ONLY 
 #
 # USE
 # ---
 # Point the module at it (see modules/local/sv_report_index/main.nf), or
 # override per-run without editing code:
 #   nextflow run main.nf \
-#     --process.withName:SV_REPORT_INDEX.container '<registry>/tall-sv-report:4.6.1-v1'
+#     --process.withName:SV_REPORT_INDEX.container 'ghcr.io/meshinchi-lab/sv_report_index:2026.10'
 #
 # NOTE ON BUILD TIME
 # ------------------
@@ -45,9 +46,14 @@
 
 # Overridable so this is not a hardcoded constant (buildx lint
 # FromPlatformFlagConstDisallowed), but defaulted because the base has no other
-# option: `docker build --build-arg BASE_PLATFORM=... containers/sv_report_index`
+# option: `docker build --build-arg BASE_PLATFORM=... docker/sv_report_index`
 ARG BASE_PLATFORM=linux/amd64
-FROM --platform=${BASE_PLATFORM} rocker/verse:4.6.1
+# Pinned by digest, not tag. The `4.6.1` tag is mutable upstream and was
+# rebuilt at least twice between 2026-09-23 and 2026-10-07; a tag-only FROM
+# therefore does not reproduce. This digest is the manifest list every render
+# ran against during validation (2026-09-30 .. 2026-10-07). Bump deliberately:
+#   docker manifest inspect rocker/verse:4.6.1   # new list digest
+FROM --platform=${BASE_PLATFORM} rocker/verse:4.6.1@sha256:408c531408bb3db00dacb2e98311d1a4671ba7f128688b3649630a6a480a239e
 
 # Fail the build on any error in a pipeline, not just the last command.
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
@@ -102,25 +108,23 @@ RUN Rscript -e ' \
 # bump that changes Quarto is visible in the build log rather than at render.
 RUN quarto --version
 
-# ---- Labels (LAST on purpose) ---------------------------------------------
-# Placed at the end so editing metadata does not invalidate the apt/CRAN/Bioc
-# layers above and force a full rebuild.
-#
-# THESE MUST OVERRIDE THE BASE. rocker/verse sets its own OCI labels, and they
-# are INHERITED unless restated. In particular it ships
-#   org.opencontainers.image.source = https://github.com/rocker-org/rocker-versioned2
-# and GHCR uses exactly that label to decide which repository a package links
-# to. Leave it inherited and the package is filed against rocker's repo instead
-# of ours: it will not appear in this repository's Packages sidebar.
+
 ARG IMAGE_SOURCE=https://github.com/meshinchi-lab/lrwgs-somatic-anno-nf
-ARG IMAGE_VERSION=2026.09
+ARG IMAGE_VERSION=2026.10
+# Stamped at build time (see BUILD above); "unknown" marks an unstamped local build.
+ARG IMAGE_REVISION=unknown
+ARG IMAGE_CREATED=unknown
+ARG IMAGE_AUTHORS="Jenny L. Smith, Meshinchi Lab"
 LABEL org.opencontainers.image.source="${IMAGE_SOURCE}" \
       org.opencontainers.image.url="${IMAGE_SOURCE}" \
-      org.opencontainers.image.documentation="${IMAGE_SOURCE}/blob/master/containers/sv_report_index/Dockerfile" \
+      org.opencontainers.image.documentation="${IMAGE_SOURCE}/blob/main/docker/sv_report_index/Dockerfile" \
       org.opencontainers.image.title="sv_report_index" \
       org.opencontainers.image.description="rocker/verse 4.6.1 + DT, plotly, ensembldb, plyranges for the SV_REPORT_INDEX Quarto report" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}" \
+      org.opencontainers.image.created="${IMAGE_CREATED}" \
       org.opencontainers.image.base.name="docker.io/rocker/verse:4.6.1" \
+      org.opencontainers.image.base.digest="sha256:408c531408bb3db00dacb2e98311d1a4671ba7f128688b3649630a6a480a239e" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.vendor="Meshinchi Lab" \
-      org.opencontainers.image.authors=""
+      org.opencontainers.image.authors="${IMAGE_AUTHORS}"

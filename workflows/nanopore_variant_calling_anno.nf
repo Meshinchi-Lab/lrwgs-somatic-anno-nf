@@ -380,6 +380,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     def rpt_dict_snv    = snv_dict_ch.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
 
     SV_REPORT_INDEX(
+        file("${projectDir}/bin/sv_report_index.qmd"),
         rpt_annotsv_tsv,
         rpt_knot_html,
         rpt_knot_xl,
@@ -434,6 +435,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
         // card, instead of the whole render silently dropping out of the DAG.
         //
         SV_REPORT_INDEX_COHORT(
+            file("${projectDir}/bin/sv_report_index.qmd"),
             rpt_annotsv_tsv,
             rpt_knot_html,
             rpt_knot_xl,

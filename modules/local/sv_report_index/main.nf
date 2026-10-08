@@ -8,6 +8,11 @@ process SV_REPORT_INDEX {
         'docker.io/rocker/verse:4.6.1' }"
 
     input:
+    // The report source itself, as a DECLARED input. It used to be `cp`'d from
+    // projectDir inside the script, which is invisible to the task hash: an edit
+    // to the qmd did not invalidate the cache, so `-resume` could re-publish a
+    // stale (or broken) render while the source on disk said otherwise.
+    path report_qmd,            stageAs: 'report_src/*'
     path annotsv_tsvs
     path knot_htmls,            stageAs: 'knot/*'
     path knot_xls,              stageAs: 'knot/*'   // .xlsm files land in the same dir as the HTML reports
@@ -97,7 +102,7 @@ process SV_REPORT_INDEX {
     def pp_genome_arg      = params.proteinpaint_genome ?: 'hg38'
     """
     export HOME="\${PWD}"
-    cp ${projectDir}/bin/sv_report_index.qmd .
+    cp ${report_qmd} sv_report_index.qmd
 
     quarto render sv_report_index.qmd \\
         --output index.html \\

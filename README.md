@@ -6,8 +6,10 @@ A Nextflow DSL2 pipeline for merging, annotating, filtering, and prioritising **
 
 Input VCFs are produced upstream by two nf-core-style pipelines that this workflow consumes directly:
 
-- **[KolmogorovLab/Lumos](https://github.com/KolmogorovLab/Lumos)** — long-read WGS SV calling (Severus) and allele-specific copy number calling (Wakhan) from Nanopore BAMs. This cohort is **tumour-only** (no matched normal), so somatic status is not established by subtracting a matched normal; it is inferred downstream from population allele frequency (gnomAD-SV), clinical evidence (ClinVar, AnnotSV ACMG), and single-haplotype read support. That premise is what the SV/CNA/SNV filtering strategy below is built around.
-- **[epi2me-labs/wf-somatic-variation](https://github.com/epi2me-labs/wf-somatic-variation)** — Oxford Nanopore's end-to-end somatic workflow, providing SAVANA structural variants and ClairS-TO / DeepSomatic SNV consensus calls.
+- **[KolmogorovLab/Lumos](https://github.com/KolmogorovLab/Lumos)** (run from the [Meshinchi-Lab/Lumos](https://github.com/Meshinchi-Lab/Lumos) fork) — long-read WGS SV calling (Severus), allele-specific copy number calling (Wakhan), and somatic SNV calling (DeepSomatic) from Nanopore BAMs. This cohort is **tumour-only** (no matched normal), so somatic status is not established by subtracting a matched normal; it is inferred downstream from population allele frequency (gnomAD-SV), clinical evidence (ClinVar, AnnotSV ACMG), and single-haplotype read support. That premise is what the SV/CNA/SNV filtering strategy below is built around.
+- **[epi2me-labs/wf-somatic-variation](https://github.com/epi2me-labs/wf-somatic-variation)** — Oxford Nanopore's end-to-end somatic workflow, providing ClairS-TO SNV calls.
+
+SAVANA structural variants are called within this pipeline, unless precomputed SAVANA VCFs are supplied in the samplesheet `savana_sv` column.
 
 The pipeline then runs three parallel variant-type paths — SV, CNA, SNV — each with its own merge → annotate → filter → prioritise chain that converges on a single cohort-level Quarto report / Interactive dashboard:
 
@@ -31,8 +33,7 @@ Prepares and merges the per-caller VCFs:
 
 1. `BCFTOOLS_REHEADER` — standardise sample headers
 2. `BCFTOOLS_VIEW` / `BCFTOOLS_SORT` / `BCFTOOLS_INDEX` — filter, sort, and index each caller VCF
-3. Merge with one of:
-   - **MINDA** (default) — ensemble merging with CALLER-aware consensus
+3. Merge with **MINDA** — ensemble merging with CALLER-aware consensus
 
 
 ### MINDA_ANNOTATIONS
@@ -154,12 +155,12 @@ Single-pass vembrane filter over the fully-annotated SNV VCF.
 |--------|-----------|
 | A. ClinVar pathogenic-leaning | `CLNSIG` matches "Pathogenic" / "Likely_pathogenic" / "Pathogenic_low_penetrance" |
 | B. SCI Tier I / II somatic clinical impact | 2024 ClinVar `SCI` field not empty |
-| C. OncoKB oncogenic | `ONC` contains "Oncogenic" or "Likely_oncogenic" |
-| D. Novel-variant path | HIGH/MODERATE IMPACT + both `CLAIRSTO_VAF` and `DEEPSOMATIC_VAF` ≥ `params.snv_min_vaf` (default 0.05) + not benign + SIFT `deleterious` + PolyPhen `damaging` + on `params.candidate_genes` panel |
+| C. ClinVar oncogenic | `ONC` contains "Oncogenic" or "Likely_oncogenic" |
+| D. Novel-variant path | HIGH/MODERATE IMPACT + both `CLAIRSTO_VAF` and `DEEPSOMATIC_VAF` ≥ `params.snv_min_vaf` (default 0.05) + not benign + SIFT `deleterious` + PolyPhen `damaging` + on `--candidateGenesFile` panel |
 
 `ANN.gnomADg_AF < params.snv_gnomad_af_max` (default 0.01) applied to every clause — a common ClinVar-Pathogenic variant that is frequent in gnomAD is dropped as a soft PoN.
 
-Output: bgzipped, tabix-indexed filtered VCF (`*.consensus.snv.filtered.vcf.gz`) plus a vembrane-derived TSV table with per-caller VAFs, ClinVar / CIViC / OncoKB fields, and VEP consequence + IMPACT + gnomAD AF.
+Output: bgzipped, tabix-indexed filtered VCF (`*.snv.filtered.vcf.gz`) plus a vembrane-derived TSV table with per-caller VAFs, ClinVar / CIViC fields, and VEP consequence + IMPACT + gnomAD AF.
 
 ### SV_REPORT_INDEX (cohort-level)
 
@@ -173,7 +174,7 @@ Inputs gathered across all samples:
 
 The rendered `index.html` provides a cohort-level view of all per-sample KnotAnnotSV and VEP reports in one place, suitable for cohort-level SV review and filtering.
 
-Output: `results/annotations_sv/sv_report_index/index.html`
+Output: `results/sv_report/index.html`
 
 ---
 
@@ -190,7 +191,7 @@ Tier 1 variants are included in the interactive DISCO plot and lollipop plots.
 | Tier | Criterion | `tier_score` tie-breaker |
 |---|---|---|
 | **T1** | Any SVTYPE-matched `name_ST17_*` hit (empirical T-ALL recurrence BED). BND records also gain their intra-chromosomal partner from `name_ST17_DEL` because the ST17 BND BED is by author's definition inter-chromosomal only. Partner chromosome is cross-validated against the ALT bracket notation within a 10 kb tolerance. | max integer score across the SVTYPE-matched `score_ST17_*` cells — a proxy for how many T-ALL samples had this event. |
-| **T2** | No ST17 hit, but ≥ 1 gene in the record's `Gene_name` / `Closest_left` / `Closest_right` overlaps the `params$candidate_genes` panel. Intergenic BND breakpoints are covered because closest-flanking genes are checked. | count of overlapping candidate genes (breadth of impact). |
+| **T2** | No ST17 hit, but ≥ 1 gene in the record's `Gene_name` / `Closest_left` / `Closest_right` overlaps the `--candidateGenesFile` panel. Intergenic BND breakpoints are covered because closest-flanking genes are checked. | count of overlapping candidate genes (breadth of impact). |
 | **T3** | Neither an ST17 hit nor a candidate-gene overlap, but the record survived the pass2 vembrane gate (P_gain/P_loss/P_ins source, RE_gene, ACMG 3–5, ClinVar pathogenic, etc.). | `AnnotSV_ranking_score`. |
 
 ### Copy-number alterations (CNA)
@@ -205,14 +206,14 @@ Tier 1 variants are included in the interactive DISCO plot and lollipop plots.
 
 | Tier | Criterion | `tier_score` tie-breaker |
 |---|---|---|
-| **T1** | ClinGen/OncoKB `ONC` field contains "oncogenic" ("Oncogenic" + "Likely_oncogenic") **AND** `SYMBOL` is in the candidate-gene `params$candidate_genes` panel. | max(`CLAIRSTO_VAF`, `DEEPSOMATIC_VAF`) — higher = stronger somatic call. |
+| **T1** | ClinVar oncogenicity `ONC` field contains "oncogenic" ("Oncogenic" + "Likely_oncogenic") **AND** `SYMBOL` is in the candidate-gene `--candidateGenesFile` panel. | max(`CLAIRSTO_VAF`, `DEEPSOMATIC_VAF`) — higher = stronger somatic call. |
 | **T2** | ClinVar `CLNSIG` matches "pathogenic" (catches "Pathogenic", "Likely_pathogenic", "Pathogenic_low_penetrance") **OR** `SYMBOL` is in the candidate-gene panel. | same VAF max. |
 | **T3** | Passed the FILTER_SNV gate on other evidence (SIFT deleterious / PolyPhen damaging predictions, etc.). | same VAF max. |
 
 
 ### Custom References 
 
-The `params$candidate_genes` panel and the customized BED files from the Nextflow.config are found in the `params$publishDir` under annotsv/setupuseranno so these can be used for further down-stream investigations and comparisons. 
+The `--candidateGenesFile` panel and the customized BED files from the Nextflow.config are found in the `--outdir` under annotsv/setupuseranno so these can be used for further down-stream investigations and comparisons. 
 
 ---
 
@@ -236,7 +237,7 @@ User BED files supplied via `--FtIncludedInSV`, `--SVincludedInFt`, or `--AnyOve
 
 ## Requirements
 
-- Nextflow >= 25.10.4
+- Nextflow 25.10.0 (pinned in `nextflow.config`)
 - Docker, Singularity/Apptainer, or Conda
 - Reference files (see [Reference data](#reference-data) below)
 
@@ -249,8 +250,8 @@ User BED files supplied via `--FtIncludedInSV`, `--SVincludedInFt`, or `--AnyOve
 The pipeline takes a CSV samplesheet. Each row is one sample with paths to aligned BAM/CRAM files and pre-called SV/CNV/SNV VCFs:
 
 ```csv
-sample,bam,bai,severus_vcf,savana_vcf,...
-SAMPLE1,sample1.bam,sample1.bam.bai,sample1.severus.vcf.gz,sample1.savana.vcf.gz,...
+id,bam,severus_sv,savana_sv,wahkan_cnv,clairsto_snv,deepsomatic_snv
+SAMPLE_1,/path/to/SAMPLE_1.haplotagged.bam,/path/to/SAMPLE_1.severus_somatic.vcf.gz,,/path/to/SAMPLE_1.wakhan_cna.vcf.gz,/path/to/SAMPLE_1.wf-somatic-snv.vcf.gz,/path/to/SAMPLE_1.deepsomatic.vcf.gz
 ```
 
 ### Minimal run
@@ -266,25 +267,24 @@ nextflow run Meshinchi-Lab/lrwgs-somatic-anno-nf \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--input` | — | Path to samplesheet CSV |
-| `--outdir` | `./results` | Output directory |
+| `--input` | `data/2025-07-24-AIEOP-BFM_T-ALL_wgs_nanopore_batches_samplesheet.csv` | Path to samplesheet CSV |
+| `--outdir` | `results/patient_ctrl_samples` | Output directory |
 | `--genome` | `GRCh38` | Genome build |
-| `--fasta` | — | Path to reference FASTA |
-| `--contigs_file` | — | Chromosome contig list for SAVANA |
+| `--fasta` | `data/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna` | Path to reference FASTA |
+| `--contigs_file` | SAVANA `contigs.chr.hg38.txt` (GitHub URL) | Chromosome contig list for SAVANA |
 | `--pon_1kg` | `1000g_hg38` | SAVANA panel-of-normals identifier |
 | `--sv_merge_size` | `100` | Size threshold for SV merging |
-| `--annotsv_annotations` | — | Path to pre-built AnnotSV database (null = auto-download) |
-| `--candidateGenesFile` | — | Gene list for AnnotSV candidate gene annotation |
-| `--FtIncludedInSV` | `[]` | BED files for AnnotSV FtIncludedInSV user annotations |
+| `--annotsv_annotations` | `data/reference/AnnotSV` | Path to pre-built AnnotSV database (null = auto-download) |
+| `--candidateGenesFile` | `data/reference/genomic_basis_tall/ST9.alterations_OncoKB_cancer_genes.txt` | Gene list for AnnotSV candidate gene annotation |
+| `--FtIncludedInSV` | `ST17_Alterations.SV.All_{DEL,DUP,INS,INV}.bed` in `data/reference/genomic_basis_tall/` | BED files for AnnotSV FtIncludedInSV user annotations |
 | `--SVincludedInFt` | `[]` | BED files for AnnotSV SVincludedInFt user annotations |
-| `--AnyOverlap` | `[]` | BED files for AnnotSV AnyOverlap user annotations |
-| `--sample_metadata` | — | CSV with cohort-level sample metadata for the `SV_REPORT_INDEX` Quarto report |
-| `--knot_config` | — | Custom KnotAnnotSV config YAML |
-| `--knot_out_xl` | `false` | Output `.xlsm` instead of HTML |
-| `--vep_cache` | `null` | Path to pre-built VEP cache (null = skips VEP unless `sv_vcf`/`sv_clinvar` set) |
+| `--AnyOverlap` | `data/reference/genomic_basis_tall/ST17_Alterations.SV.All_BND.bed` | BED files for AnnotSV AnyOverlap user annotations |
+| `--sample_metadata` | `data/2025-07-24-AIEOP-BFM_T-ALL_wgs_nanopore_wf_metadata.csv` | CSV with cohort-level sample metadata for the `SV_REPORT_INDEX` Quarto report |
+| `--knot_config` | `./config_AnnotSV.yaml` | Custom KnotAnnotSV config YAML |
+| `--vep_cache` | `data/vep` | Path to pre-built VEP cache (null = skips VEP unless `sv_vcf`/`sv_clinvar` set) |
 | `--include_cache` | `false` | Auto-download VEP cache when `vep_cache` is null |
-| `--sv_vcf` | — | gnomAD SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
-| `--sv_clinvar` | — | ClinVar SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
+| `--sv_vcf` | `data/gnomad_sv_cnv/gnomad.v4.1.sv.sites.vcf.gz` | gnomAD SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
+| `--sv_clinvar` | `data/clinvar/nstd102.GRCh38.variant_call.vcf.gz` | ClinVar SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
 | `--species` | `homo_sapiens` | VEP species |
 | `--cache_version` | `115` | VEP cache version |
 
@@ -473,11 +473,12 @@ results/
 ├── annotations_sv/
 │   ├── merged_sv_caller/  # final merged+CALLER VCF (Severus + SAVANA-only)
 │   ├── annotsv/           # AnnotSV TSV + VCF outputs
-│   │   └── setupuseranno/ # pre-processed AnnotSV reference with user BED annotations
 │   ├── knotannotsv/       # interactive HTML report
-│   ├── ensemblvep/        # VEP-annotated VCF (when enabled)
-│   ├── filter_sv/         # vembrane-filtered VCF (*.merged.annotated.filtered.vcf.gz + .tbi)
-│   └── sv_report_index/   # cohort-level Quarto HTML report (index.html)
+│   └── ensemblvep/        # VEP-annotated VCF (when enabled)
+├── annotsv/
+│   └── setupuseranno/     # pre-processed AnnotSV reference with user BED annotations
+├── filter_sv/             # vembrane-filtered VCF (*.merged.annotated.filtered.pass2.vcf.gz + .tbi)
+├── sv_report/             # cohort-level Quarto HTML report (index.html)
 └── pipeline_info/         # execution timeline, report, trace, DAG
 ```
 

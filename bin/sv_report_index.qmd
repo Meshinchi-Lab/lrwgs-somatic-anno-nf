@@ -1495,6 +1495,19 @@ edb_annot_available <- !is.null(params$ensembl_db) &&
                         requireNamespace("ensembldb", quietly = TRUE) &&
                         requireNamespace("plyranges", quietly = TRUE)
 
+# FAIL LOUDLY when an EnsDb was supplied but its packages are unavailable.
+# install_bioc_if_missing() only message()s on failure
+if (!is.null(params$ensembl_db) && nzchar(params$ensembl_db) &&
+    file.exists(params$ensembl_db) && !edb_annot_available) {
+  stop(paste0(
+    "params$ensembl_db is set (", params$ensembl_db, ") but the 'ensembldb' / ",
+    "'plyranges' R packages are not loadable: the runtime Bioconductor install ",
+    "failed (see 'Optional Bioc install skipped' above). Refusing to render a ",
+    "report without breakpoint gene annotation. Bake these packages into the ",
+    "SV_REPORT_INDEX container image, or restore access to the package repositories."),
+    call. = FALSE)
+}
+
 if (edb_annot_available && nrow(pass2_clean) > 0 &&
     all(c("breakpoint", "SVTYPE", "ID") %in% names(pass2_clean))) {
 
@@ -1727,8 +1740,8 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
       tidyr::pivot_wider(id_cols     = ID,
                          names_from  = side,
                          values_from = c(gene_name, canonical_transcript,
-                                         gene_strand, distance, gene_source,
-                                         nearest_genes),
+                                         gene_strand, gene_biotype, distance,
+                                         gene_source, nearest_genes),
                          names_glue  = "{.value}_{side}")
 
     pass2_clean <- pass2_clean |>
@@ -2650,6 +2663,23 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
 
   .pfx <- function(x) ifelse(is.na(x) | !nzchar(x) | startsWith(x, "chr"),
                              x, paste0("chr", x))
+  # An isoform accession is only meaningful when ALL of:
+  #   1. the breakpoint lies INSIDE the gene (gene_source == "overlap"). A
+  #      nearest-gene assignment is intergenic by definition, and the spec says
+  #      "leave blank for intergenic break-end" (gene name too).
+  #   2. the gene is protein_coding. With no protein the FusionEditor degrades to a
+  #      featureless box, silently; and labelling a lncRNA / pseudogene breakend
+  #      with a transcript implies a fusion protein that cannot exist.
+  #   3. the accession is Ensembl ENST or RefSeq NM_. EnsDb also surfaces LRG_*
+  #      transcripts (LRG_482t1 for RUNX1, from the LRG_1383 duplicate gene
+  #      record) which the spec does not accept.
+  # Observed 2026-10-02: 0 of 18 exported rows had a blank isoform, so the
+  # intergenic path the spec defines was never exercised.
+  .iso_ok <- function(iso, src, bio) {
+    !is.na(iso) & grepl("^(ENST|NM_)[0-9]+", iso) &
+      !is.na(src) & src == "overlap" &
+      !is.na(bio) & bio == "protein_coding"
+  }
   # gene / isoform / strand per side come from the EnsDb join above. They are
   # absent when params$ensembl_db is unset — fall back to blanks, which the
   # spec permits (renders an intergenic box rather than a protein).
@@ -2666,6 +2696,8 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
     g_l    = .col("gene_name_left"),            g_r = .col("gene_name_right"),
     t_l    = .col("canonical_transcript_left"), t_r = .col("canonical_transcript_right"),
     s_l    = .col("gene_strand_left"),          s_r = .col("gene_strand_right"),
+    b_l    = .col("gene_biotype_left"),         b_r = .col("gene_biotype_right"),
+    o_l    = .col("gene_source_left"),          o_r = .col("gene_source_right"),
     DV     = .col("DV")
   ) |>
     dplyr::filter(!is.na(tier), tier %in% c(1L, 2L)) |>
@@ -2685,11 +2717,15 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
         gen_a = ifelse(.bnd & !.five, g_r, g_l),
         iso_a = ifelse(.bnd & !.five, t_r, t_l),
         str_a = ifelse(.bnd & !.five, s_r, s_l),
+        bio_a = ifelse(.bnd & !.five, b_r, b_l),
+        src_a = ifelse(.bnd & !.five, o_r, o_l),
         chr_b = .pfx(ifelse(.bnd, ifelse(.five, .m[, 2], CHROM), CHROM)),
         pos_b = ifelse(.bnd, ifelse(.five, suppressWarnings(as.numeric(.m[, 3])), POS), END),
         gen_b = ifelse(.bnd & !.five, g_l, g_r),
         iso_b = ifelse(.bnd & !.five, t_l, t_r),
-        str_b = ifelse(.bnd & !.five, s_l, s_r)
+        str_b = ifelse(.bnd & !.five, s_l, s_r),
+        bio_b = ifelse(.bnd & !.five, b_l, b_r),
+        src_b = ifelse(.bnd & !.five, o_l, o_r)
       ) |>
       # drop non-BND records that have no usable second breakpoint
       dplyr::filter(!is.na(pos_a), !is.na(pos_b), pos_a != pos_b | .bnd) |>
@@ -2699,11 +2735,29 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
                                  pmax(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)))) |>
       dplyr::distinct(.key, .keep_all = TRUE)
 
+    # A DEL/DUP/INV whose two breakpoints resolve to the SAME gene is an
+    # intragenic event, not a two-partner fusion. Emitting it as GENE::GENE is
+    # not accurate (LINC00649::LINC00649 and HMGA1P4::HMGA1P4).
+    # Counted into pp_sv_note so the suppression is visible, not silent.
+    .intra <- !is.na(.d$gen_a) & !is.na(.d$gen_b) & nzchar(.d$gen_a) &
+              .d$gen_a == .d$gen_b
+    pp_sv_n_intragenic <- sum(.intra)
+    .d <- .d[!.intra, ]
+
+    .ok_a    <- .iso_ok(.d$iso_a, .d$src_a, .d$bio_a)
+    .ok_b    <- .iso_ok(.d$iso_b, .d$src_b, .d$bio_b)
+    .inter_a <- is.na(.d$src_a) | .d$src_a != "overlap"   # intergenic: blank gene too
+    .inter_b <- is.na(.d$src_b) | .d$src_b != "overlap"
+    pp_sv_n_iso_blank <- sum(!.ok_a & !is.na(.d$iso_a) & nzchar(.d$iso_a)) +
+                         sum(!.ok_b & !is.na(.d$iso_b) & nzchar(.d$iso_b))
+
     pp_sv_fusion <- .d |>
       dplyr::transmute(
-        gene_a = dplyr::coalesce(gen_a, ""), isoform_a = dplyr::coalesce(iso_a, ""),
+        gene_a = ifelse(.inter_a, "", dplyr::coalesce(gen_a, "")),
+        isoform_a = ifelse(.ok_a, iso_a, ""),
         chr_a, position_a = as.integer(pos_a - 1), strand_a = dplyr::coalesce(str_a, "+"),
-        gene_b = dplyr::coalesce(gen_b, ""), isoform_b = dplyr::coalesce(iso_b, ""),
+        gene_b = ifelse(.inter_b, "", dplyr::coalesce(gen_b, "")),
+        isoform_b = ifelse(.ok_b, iso_b, ""),
         chr_b, position_b = as.integer(pos_b - 1), strand_b = dplyr::coalesce(str_b, "+"),
         Sample = SAMPLE, Sampletype = "diagnosis",
         SVTYPE, driver_tier = tier, Discordant_readcount = dplyr::coalesce(DV, "")
@@ -2720,9 +2774,12 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
     # escaped JS string literal.
     pp_sv_input_json <- as.character(jsonlite::toJSON(
       paste(readLines(.out, warn = FALSE), collapse = "\n"), auto_unbox = TRUE))
-    pp_sv_note <- sprintf("%d event(s) across %d sample(s) &rarr; <code>%s</code>",
-                          nrow(pp_sv_fusion),
-                          dplyr::n_distinct(pp_sv_fusion$Sample), .out)
+    pp_sv_note <- sprintf(paste0(
+        "%d event(s) across %d sample(s) &rarr; <code>%s</code>; ",
+        "%d same-gene intragenic event(s) excluded; ",
+        "%d isoform(s) blanked (intergenic, non-coding, or non-ENST/NM accession)"),
+      nrow(pp_sv_fusion), dplyr::n_distinct(pp_sv_fusion$Sample), .out,
+      pp_sv_n_intragenic, pp_sv_n_iso_blank)
   } else {
     pp_sv_note <- "No Tier 1/2 SVs with two breakpoints."
   }
@@ -2783,7 +2840,8 @@ if (!is.null(pp_sv_fusion) && nrow(pp_sv_fusion) > 0) {
 ::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
 SV Protein Paint &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
 Genome build `r pp_genome`. BND mate pairs are collapsed to one event; INS is excluded
-(no second breakpoint).
+(no second breakpoint); same-gene DEL/DUP/INV are excluded (intragenic, not a fusion).
+An isoform is given only where the breakpoint lies inside a protein-coding gene with an ENST/NM accession — otherwise it is blank per the svfusion spec, and an intergenic breakend has its gene blanked too.
 :::
 
 ## Row {.fill}

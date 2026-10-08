@@ -1,0 +1,6 @@
+# Admit only the two files the Dockerfile needs. Applies when this directory
+# is the build context (the documented command). A repo-root context is guarded
+# differently: COPY install_pkgs.R fails there, so the build cannot complete.
+*
+!Dockerfile
+!install_pkgs.R
