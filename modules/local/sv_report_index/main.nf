@@ -4,8 +4,8 @@ process SV_REPORT_INDEX {
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine in ['singularity', 'apptainer'] && !task.ext.singularity_pull_docker_container ?
-        'docker://docker.io/rocker/verse:4.6.1' :
-        'docker.io/rocker/verse:4.6.1' }"
+        'docker://ghcr.io/meshinchi-lab/sv_report_index:2026.10' :
+        'ghcr.io/meshinchi-lab/sv_report_index:2026.10' }"
 
     input:
     // The report source itself, as a DECLARED input. It used to be `cp`'d from
