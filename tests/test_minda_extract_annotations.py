@@ -10,9 +10,12 @@ SAVANA_VCF = """\
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="SV type">
 ##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
 ##INFO=<ID=MATEID,Number=1,Type=String,Description="Mate BND ID">
+##INFO=<ID=TUMOUR_READ_SUPPORT,Number=1,Type=Integer,Description="Number of SV supporting tumour reads">
+##INFO=<ID=TUMOUR_AF,Number=2,Type=Float,Description="Allele-fraction at breakpoint">
+##INFO=<ID=CLASS,Number=1,Type=String,Description="Variant class prediction">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tcolo829
-chr21\t10000\tID_1_1\tN\t<DEL>\t.\t.\tSVTYPE=BND;END=20000;MATEID=ID_1_2\t.\t.
-chr21\t20000\tID_1_2\tN\t]chr21:10000]\t.\t.\tSVTYPE=BND;END=20001;MATEID=ID_1_1\t.\t.
+chr21\t10000\tID_1_1\tN\t<DEL>\t.\t.\tSVTYPE=BND;END=20000;MATEID=ID_1_2;TUMOUR_READ_SUPPORT=80;TUMOUR_AF=0.365,1;CLASS=PREDICTED_SOMATIC\t.\t.
+chr21\t20000\tID_1_2\tN\t]chr21:10000]\t.\t.\tSVTYPE=BND;END=20001;MATEID=ID_1_1;TUMOUR_READ_SUPPORT=80;TUMOUR_AF=1,0.365;CLASS=PREDICTED_SOMATIC\t.\t.
 chr22\t50000\tID_2_1\tN\t<INS>\t.\t.\tSVTYPE=BND;END=50001\t.\t.
 """
 
@@ -25,6 +28,7 @@ SEVERUS_VCF = """\
 chr21\t9990\tseverus_BND1_1\tN\t<BND>\t.\t.\tSVTYPE=BND;END=9990;MATE_ID=severus_BND1_2\t.\t.
 chr21\t19990\tseverus_BND1_2\tN\t<BND>\t.\t.\tSVTYPE=BND;END=19990;MATE_ID=severus_BND1_1\t.\t.
 chr22\t50100\tseverus_INS3\tN\t<INS>\t.\t.\tSVTYPE=INS;END=50101\t.\t.
+chr22\t60000\tseverus_DEL4\tN\t<DEL>\t.\t.\tSVTYPE=DEL;END=61000\t.\t.
 """
 
 MINDA_VCF = """\
@@ -39,6 +43,14 @@ chr22\t50100\t.\tN\t<INS>\t.\t.\tSVTYPE=INS;SUPP_VEC=severus_INS3,ID_2_1
 
 def _write(path, content):
     Path(path).write_text(content)
+
+
+def read_tab(path):
+    """Parse <sample>.annotation.tab.gz into {ID: {column: value}}."""
+    with gzip.open(path, "rt") as fh:
+        cols = fh.readline().lstrip("#").rstrip("\n").split("\t")
+        rows = (line.rstrip("\n").split("\t") for line in fh if line.strip())
+        return {r[2]: dict(zip(cols, r)) for r in rows}
 
 
 def run_script(minda_vcf, severus_vcf, savana_vcf, sample_id="test"):
@@ -118,3 +130,54 @@ class TestMindaExtractAnnotations:
         for field in ["CALLER", "SAVANA_ID", "SAVANA_SVTYPE", "SAVANA_POS",
                       "SAVANA_END", "SAVANA_CHR2", "SAVANA_POS2", "SAVANA_MATEID"]:
             assert field in header, f"Missing INFO field: {field}"
+
+    def test_header_declares_savana_quality_fields(self, tmp_path):
+        """header.txt must declare the SAVANA somatic-quality INFO fields with
+        SAVANA's own Number/Type so bcftools annotate types them correctly."""
+        _write(tmp_path / "minda.vcf", MINDA_VCF)
+        _write(tmp_path / "severus.vcf", SEVERUS_VCF)
+        _write(tmp_path / "savana.vcf", SAVANA_VCF)
+        os.chdir(tmp_path)
+        r = run_script(
+            str(tmp_path / "minda.vcf"),
+            str(tmp_path / "severus.vcf"),
+            str(tmp_path / "savana.vcf"),
+        )
+        assert r.returncode == 0, r.stderr
+        header = (tmp_path / "test.header.txt").read_text()
+        assert "##INFO=<ID=TUMOUR_READ_SUPPORT,Number=1,Type=Integer," in header
+        assert "##INFO=<ID=TUMOUR_AF,Number=2,Type=Float," in header
+        assert "##INFO=<ID=CLASS,Number=1,Type=String," in header
+
+    def test_annotation_tab_carries_savana_quality_fields(self, tmp_path):
+        """MINDA consensus rows carry TUMOUR_READ_SUPPORT / TUMOUR_AF / CLASS
+        copied from the matched SAVANA record, propagated to the Severus BND
+        mate. Rows whose SAVANA match lacks the fields, and Severus-only rows,
+        carry '.' so bcftools annotate leaves the tag unset."""
+        _write(tmp_path / "minda.vcf", MINDA_VCF)
+        _write(tmp_path / "severus.vcf", SEVERUS_VCF)
+        _write(tmp_path / "savana.vcf", SAVANA_VCF)
+        os.chdir(tmp_path)
+        r = run_script(
+            str(tmp_path / "minda.vcf"),
+            str(tmp_path / "severus.vcf"),
+            str(tmp_path / "savana.vcf"),
+        )
+        assert r.returncode == 0, r.stderr
+        rows = read_tab(tmp_path / "test.annotation.tab.gz")
+
+        for sev_id in ("severus_BND1_1", "severus_BND1_2"):   # MINDA match + its mate
+            assert rows[sev_id]["CALLER"] == "MINDA"
+            assert rows[sev_id]["TUMOUR_READ_SUPPORT"] == "80"
+            assert rows[sev_id]["TUMOUR_AF"] == "0.365,1"
+            assert rows[sev_id]["CLASS"] == "PREDICTED_SOMATIC"
+
+        assert rows["severus_INS3"]["CALLER"] == "MINDA"      # matched ID_2_1 has no fields
+        assert rows["severus_INS3"]["TUMOUR_READ_SUPPORT"] == "."
+        assert rows["severus_INS3"]["TUMOUR_AF"] == "."
+        assert rows["severus_INS3"]["CLASS"] == "."
+
+        assert rows["severus_DEL4"]["CALLER"] == "SEVERUS"    # Severus-only
+        assert rows["severus_DEL4"]["TUMOUR_READ_SUPPORT"] == "."
+        assert rows["severus_DEL4"]["TUMOUR_AF"] == "."
+        assert rows["severus_DEL4"]["CLASS"] == "."

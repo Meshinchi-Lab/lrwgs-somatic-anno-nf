@@ -2,7 +2,11 @@
 """
 Extract SAVANA annotation data from MINDA ensemble VCF and produce:
   <sample_id>.annotation.tab.gz + .tbi  — tab-delimited, matched by CHROM+POS+~ID
-  <sample_id>.header.txt                — 8 ##INFO lines for bcftools annotate
+  <sample_id>.header.txt                — 11 ##INFO lines for bcftools annotate:
+                                          CALLER, the 7 positional SAVANA_* fields, and
+                                          SAVANA's own TUMOUR_READ_SUPPORT / TUMOUR_AF /
+                                          CLASS somatic-quality fields, copied verbatim
+                                          onto MINDA consensus records
   <sample_id>.savana_supported_ids.txt  — SAVANA IDs seen in MINDA (both BND mates)
 """
 
@@ -23,6 +27,11 @@ INFO_LINES = [
     '##INFO=<ID=SAVANA_CHR2,Number=1,Type=String,Description="SAVANA second chromosome (BND only)">',
     '##INFO=<ID=SAVANA_POS2,Number=1,Type=Integer,Description="SAVANA second breakpoint position (BND only)">',
     '##INFO=<ID=SAVANA_MATEID,Number=1,Type=String,Description="SAVANA BND mate ID">',
+    # SAVANA somatic-quality fields, declared with SAVANA's own Number/Type so
+    # bcftools annotate types them identically on the Severus consensus records.
+    '##INFO=<ID=TUMOUR_READ_SUPPORT,Number=1,Type=Integer,Description="Number of SV supporting tumour reads">',
+    '##INFO=<ID=TUMOUR_AF,Number=2,Type=Float,Description="Allele-fraction (AF) of tumour variant-supporting reads to tumour read depth (DP) at breakpoint">',
+    '##INFO=<ID=CLASS,Number=1,Type=String,Description="SAVANA variant class prediction (somatic model, after filtering for low AF or support)">',
 ]
 
 
@@ -42,6 +51,12 @@ def open_vcf(path):
     if p.endswith('.gz'):
         return gzip.open(p, 'rt')
     return open(p, 'r')
+
+
+def info_value(info, key):
+    """Value of a key=value INFO entry, verbatim; '.' when absent, blank or a bare flag."""
+    v = info.get(key)
+    return v if isinstance(v, str) and v else '.'
 
 
 def build_savana_dict(savana_vcf):
@@ -65,6 +80,10 @@ def build_savana_dict(savana_vcf):
             savana[vid] = {
                 'chrom': chrom, 'pos': pos, 'svtype': svtype,
                 'end': end, 'chr2': chr2, 'pos2': pos2, 'mateid': mateid,
+                # somatic-quality fields carried verbatim ('.' = unset for bcftools annotate)
+                'read_support': info_value(info, 'TUMOUR_READ_SUPPORT'),
+                'af':           info_value(info, 'TUMOUR_AF'),
+                'cls':          info_value(info, 'CLASS'),
             }
     return savana
 
@@ -119,6 +138,9 @@ def build_annotation_map(minda_vcf, savana_dict, severus_dict):
                 'SAVANA_CHR2':   str(sav['chr2']),
                 'SAVANA_POS2':   str(sav['pos2']),
                 'SAVANA_MATEID': str(sav['mateid']),
+                'TUMOUR_READ_SUPPORT': sav['read_support'],
+                'TUMOUR_AF':           sav['af'],
+                'CLASS':               sav['cls'],
             }
 
             annotation_map[severus_id] = ann
@@ -154,16 +176,20 @@ def write_annotation_tab(annotation_map, severus_dict, sample_id):
                 ann['SAVANA_ID'], ann['SAVANA_SVTYPE'], ann['SAVANA_POS'],
                 ann['SAVANA_END'], ann['SAVANA_CHR2'], ann['SAVANA_POS2'],
                 ann['SAVANA_MATEID'],
+                ann['TUMOUR_READ_SUPPORT'], ann['TUMOUR_AF'], ann['CLASS'],
             )
         else:
-            row = (sev['chrom'], sev['pos'], sev_id, 'SEVERUS', '.', '.', '.', '.', '.', '.', '.')
+            row = (sev['chrom'], sev['pos'], sev_id, 'SEVERUS',
+                   '.', '.', '.', '.', '.', '.', '.',
+                   '.', '.', '.')
         records.append(row)
 
     records.sort(key=lambda r: (r[0], r[1]))
 
     with open(out_tab, 'w') as fh:
         fh.write('#CHROM\tPOS\tID\tCALLER\tSAVANA_ID\tSAVANA_SVTYPE\tSAVANA_POS\t'
-                 'SAVANA_END\tSAVANA_CHR2\tSAVANA_POS2\tSAVANA_MATEID\n')
+                 'SAVANA_END\tSAVANA_CHR2\tSAVANA_POS2\tSAVANA_MATEID\t'
+                 'TUMOUR_READ_SUPPORT\tTUMOUR_AF\tCLASS\n')
         for row in records:
             fh.write('\t'.join(str(v) for v in row) + '\n')
 
@@ -173,7 +199,7 @@ def write_annotation_tab(annotation_map, severus_dict, sample_id):
 
 
 def write_header(sample_id):
-    """Pass 5a: write header.txt with 8 ##INFO lines."""
+    """Pass 5a: write header.txt with the 11 ##INFO lines in INFO_LINES."""
     with open(f"{sample_id}.header.txt", 'w') as fh:
         for line in INFO_LINES:
             fh.write(line + '\n')

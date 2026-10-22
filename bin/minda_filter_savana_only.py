@@ -4,8 +4,11 @@ Filter SAVANA VCF to calls absent from MINDA (SAVANA-only calls).
 
 Reads supported_ids.txt produced by minda_extract_annotations.py and removes
 all SAVANA records whose ID appears in that set. Also:
-  - appends 8 new INFO definitions from header.txt so BCFTOOLS_CONCAT sees
-    matching headers in both input VCFs
+  - appends the INFO definitions from header.txt that the SAVANA header does
+    not already declare, so BCFTOOLS_CONCAT sees matching headers in both
+    input VCFs. CALLER + SAVANA_* are new; TUMOUR_READ_SUPPORT / TUMOUR_AF /
+    CLASS are SAVANA's own (header.txt re-declares them for the Severus side)
+    and are skipped here rather than duplicated
   - renames the sample column to sample_id for BCFTOOLS_CONCAT compatibility
   - adds INFO/CALLER=SAVANA to each kept record
   - adds INFO/SAVANA_ID=<record.id> for traceability
@@ -21,8 +24,11 @@ all SAVANA records whose ID appears in that set. Also:
 
 import argparse
 import gzip
+import re
 import sys
 from pathlib import Path
+
+INFO_ID_RE = re.compile(r'^##INFO=<ID=([^,>]+)')
 
 
 def open_vcf(path):
@@ -126,6 +132,7 @@ def main():
     # Buffer records sharing the current key; flush + dedup when the key changes.
     buf = []
     cur_key = None
+    declared_info = set()   # INFO IDs the SAVANA header already declares
 
     with open_vcf(args.savana_vcf) as fh, open(out_path, 'w') as out:
         for line in fh:
@@ -133,6 +140,9 @@ def main():
 
             if line.startswith('##'):
                 out.write(line + '\n')
+                m = INFO_ID_RE.match(line)
+                if m:
+                    declared_info.add(m.group(1))
                 continue
 
             if line.startswith('#CHROM'):
@@ -142,8 +152,12 @@ def main():
                 # expects the original SAVANA header untouched.
                 if not args.dedup_only:
                     for h in extra_headers:
-                        if h.strip():
-                            out.write(h + '\n')
+                        if not h.strip():
+                            continue
+                        m = INFO_ID_RE.match(h)
+                        if m and m.group(1) in declared_info:
+                            continue   # already declared by SAVANA — keep its line
+                        out.write(h + '\n')
                     cols = line.split('\t')
                     if len(cols) > 9:
                         cols[-1] = args.sample_id

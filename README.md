@@ -40,7 +40,8 @@ Prepares and merges the per-caller VCFs:
 
 Cross-references the MINDA ensemble VCF with the original per-caller VCFs to produce two outputs used downstream:
 
-- **Annotated Severus VCF** — carries `CALLER`, `SAVANA_ID`, `SAVANA_SVTYPE`, `SAVANA_POS`, `SAVANA_END`, `SAVANA_CHR2`, `SAVANA_POS2`, `SAVANA_MATEID` INFO fields annotated from the MINDA overlap
+- **Annotated Severus VCF** — carries `CALLER`, `SAVANA_ID`, `SAVANA_SVTYPE`, `SAVANA_POS`, `SAVANA_END`, `SAVANA_CHR2`, `SAVANA_POS2`, `SAVANA_MATEID` INFO fields annotated from the MINDA overlap, plus SAVANA's own `TUMOUR_READ_SUPPORT`, `TUMOUR_AF` and `CLASS` for consensus record so the SV tables and report show SAVANA's somatic quality metrics
+
 - **SAVANA-only VCF** — calls present in SAVANA but absent from the MINDA ensemble (sorted and indexed)
 
 The `CALLER` field values are:

@@ -9,6 +9,7 @@ SAVANA_VCF = """\
 ##INFO=<ID=SVTYPE,Number=1,Type=String,Description="SV type">
 ##INFO=<ID=END,Number=1,Type=Integer,Description="End position">
 ##INFO=<ID=MATEID,Number=1,Type=String,Description="Mate BND ID">
+##INFO=<ID=TUMOUR_AF,Number=2,Type=Float,Description="Allele-fraction at breakpoint">
 #CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tcolo829
 chr21\t10000\tID_1_1\tN\t<DEL>\t.\t.\tSVTYPE=BND;END=20000\t.\t.
 chr21\t20000\tID_1_2\tN\t]chr21:10000]\t.\t.\tSVTYPE=BND;END=20001\t.\t.
@@ -27,6 +28,9 @@ HEADER_TXT = """\
 ##INFO=<ID=SAVANA_CHR2,Number=1,Type=String,Description="SAVANA second chromosome (BND only)">
 ##INFO=<ID=SAVANA_POS2,Number=1,Type=Integer,Description="SAVANA second breakpoint position (BND only)">
 ##INFO=<ID=SAVANA_MATEID,Number=1,Type=String,Description="SAVANA BND mate ID">
+##INFO=<ID=TUMOUR_READ_SUPPORT,Number=1,Type=Integer,Description="Number of SV supporting tumour reads">
+##INFO=<ID=TUMOUR_AF,Number=2,Type=Float,Description="Allele-fraction at breakpoint">
+##INFO=<ID=CLASS,Number=1,Type=String,Description="Variant class prediction">
 """
 
 
@@ -112,6 +116,31 @@ class TestMindaFilterSavanaOnly:
         content = (tmp_path / "test.savana_only.vcf").read_text()
         assert "SAVANA_ID" in content
         assert "CALLER" in content
+
+    def test_already_declared_header_lines_are_not_duplicated(self, tmp_path):
+        """header.txt now also carries SAVANA's own TUMOUR_* / CLASS declarations
+        (needed to annotate the Severus VCF). The SAVANA VCF already declares
+        those, so injecting header.txt must skip IDs the input header has and
+        add only the genuinely new ones."""
+        _write(tmp_path / "savana.vcf", SAVANA_VCF)
+        _write(tmp_path / "supported.txt", SUPPORTED_IDS)
+        _write(tmp_path / "header.txt", HEADER_TXT)
+        os.chdir(tmp_path)
+        r = run_script(
+            str(tmp_path / "savana.vcf"),
+            str(tmp_path / "supported.txt"),
+            str(tmp_path / "header.txt"),
+        )
+        assert r.returncode == 0, r.stderr
+        lines = (tmp_path / "test.savana_only.vcf").read_text().splitlines()
+        def n_decl(field):
+            return sum(1 for l in lines if l.startswith(f"##INFO=<ID={field},"))
+        assert n_decl("TUMOUR_AF") == 1            # declared by SAVANA — not re-injected
+        assert n_decl("TUMOUR_READ_SUPPORT") == 1  # absent from input — injected once
+        assert n_decl("CLASS") == 1
+        assert n_decl("CALLER") == 1
+        # the input's own declaration is the one kept
+        assert any(l.startswith("##INFO=<ID=TUMOUR_AF,") and "at breakpoint" in l for l in lines)
 
     def test_sample_column_renamed(self, tmp_path):
         """The sample column in #CHROM line must be replaced with sample_id."""
