@@ -9,6 +9,8 @@
 //   AnnotSV annotations  — use params.annotsv_annotations, else ANNOTSV_INSTALLANNOTATIONS
 //   AnnotSV user BEDs    — ANNOTSV_SETUPUSERANNO (ST17 SV + ST19 CNA in one call)
 //   ClinVar              — SETUPCLINVAR (chr-rename, norm, sort, index)
+//   SV references        — SV_REFERENCE_FILTER_CHECK (gnomAD-SV + ClinVar-SV FILTER census;
+//                          PASS-only subset for VEP --custom under the default policy)
 //   CIViC                — SETUPCIVIC → sanitize → GRCh37→GRCh38 liftover → index
 //
 // The CIViC chain exists because CIViC publishes GRCh37 coordinates only
@@ -25,6 +27,7 @@ include { ANNOTSV_SETUPUSERANNO                  } from '../../../modules/local/
 include { BUILD_RESCUE_BED                       } from '../../../modules/local/build_rescue_bed/main'
 include { SETUPCLINVAR                           } from '../../../modules/local/setupclinvar/main'
 include { SETUPCLINVAR as SETUPCIVIC             } from '../../../modules/local/setupclinvar/main'
+include { SV_REFERENCE_FILTER_CHECK              } from '../../../modules/local/sv_reference_filter_check/main'
 include { BCFTOOLS_SANITIZE_VCF                  } from '../../../modules/local/bcftools/sanitize_vcf/main'
 include { PICARD_CREATESEQUENCEDICTIONARY        } from '../../../modules/nf-core/picard/createsequencedictionary/main'
 include { PICARD_LIFTOVERVCF as LIFTOVER_CIVIC   } from '../../../modules/nf-core/picard/liftovervcf/main'
@@ -125,6 +128,32 @@ workflow PREPARE_REFERENCES {
     def ch_candidate_genes = ch_candidate_genes_file
         .map { f -> f ? [ [ id: f.simpleName ], f ] : [ [:], [] ] }
 
+    // ── SV references for VEP --custom: gnomAD-SV + ClinVar-SV ──────────
+    // Both are optional. Each supplied file goes through a FILTER census and,
+    // under sv_reference_filter_policy = 'filter' (default), is replaced by its
+    // PASS-only subset before VEP sees it (see the module header for the
+    // numbers that motivated this). The emitted value is the flat
+    // [ vcf, tbi, vcf, tbi ] list ANNOTATIONS_SV stages for VEP; the checked
+    // files keep their basenames, so the `--custom file=<basename>` arguments
+    // in modules.config are unchanged.
+    def ch_sv_custom_files = channel.value( [] )
+    def sv_refs = []
+    if ( params.sv_vcf )     sv_refs << file(params.sv_vcf,     checkIfExists: true)
+    if ( params.sv_clinvar ) sv_refs << file(params.sv_clinvar, checkIfExists: true)
+    if ( sv_refs ) {
+        SV_REFERENCE_FILTER_CHECK(
+            channel.fromList( sv_refs.collect { v -> [ v, file("${v}.tbi", checkIfExists: true) ] } ),
+            params.sv_reference_filter_policy ?: 'filter'
+        )
+        // Sorted by name: the two check tasks finish in either order, and an
+        // order-dependent list would give ENSEMBLVEP_VEP a new input hash on
+        // every -resume (observed 2026-10-22: VEP and everything downstream
+        // re-ran on a no-change resume). The file order is irrelevant to VEP.
+        ch_sv_custom_files = SV_REFERENCE_FILTER_CHECK.out.vcf_tbi
+            .flatMap { vcf, tbi -> [ vcf, tbi ] }
+            .toSortedList { p -> p.name }
+    }
+
     // ── SNV references: ClinVar + CIViC ─────────────────────────────────
     def ch_clinvar_vcf = Channel.value( [] )
     def ch_clinvar_tbi = Channel.value( [] )
@@ -206,6 +235,7 @@ workflow PREPARE_REFERENCES {
     annotsv_annotations  = ch_annotsv_ann            // [ meta, annotations_dir ]
     candidate_genes      = ch_candidate_genes        // [ meta, panel ] or [ [:], [] ]
     candidate_genes_file = ch_candidate_genes_file   // raw path or []
+    sv_custom_files      = ch_sv_custom_files        // [ vcf, tbi, ... ] checked for VEP --custom, or []
     clinvar_vcf          = ch_clinvar_vcf            // [ meta, vcf ]
     clinvar_tbi          = ch_clinvar_tbi            // [ meta, tbi ]
     civic_vcf            = ch_civic_vcf              // [ meta, vcf ] — GRCh38, lifted

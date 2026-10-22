@@ -56,7 +56,7 @@ The `CALLER` field values are:
 2. **Sort + index** the merged VCF
 3. **AnnotSV** annotation — structural variant annotation with optional user-supplied BED files (FtIncludedInSV / SVincludedInFt / AnyOverlap overlap categories); see [User BED annotations](#user-bed-annotations) below
 4. **KnotAnnotSV** — interactive HTML (or `.xlsm`) report from the AnnotSV TSV output
-5. **ENSEMBLVEP_VEP** (optional) — VEP annotation of the AnnotSV VCF with `--custom` gnomAD SV and ClinVar SV overlaps; requires either a local cache path (`--vep_cache`) or `include_cache = true` to auto-download
+5. **ENSEMBLVEP_VEP** (optional) — VEP annotation of the AnnotSV VCF with `--custom` gnomAD SV and ClinVar SV overlaps; requires either a local cache path (`--vep_cache`) or `include_cache = true` to auto-download. Both reference VCFs first pass through **SV_REFERENCE_FILTER_CHECK** (in `PREPARE_REFERENCES`): a FILTER-column census is published to `reference/sv_filter_check/`, and under the default `--sv_reference_filter_policy filter` VEP annotates against the PASS-only subset (gnomAD-SV v4.1 sites ships 955,369 non-PASS records out of 2,154,486; dbVar nstd102 carries no FILTER annotation and is used as-is).
 
 ### FILTER_SV
 
@@ -174,6 +174,8 @@ Inputs gathered across all samples:
 
 The rendered `index.html` provides a cohort-level view of all per-sample KnotAnnotSV and VEP reports in one place, suitable for cohort-level SV review and filtering.
 
+The report is rendered **twice** when `run_cohort_merge_sv` is true. Pass 1 writes the tiered tables (`cohort_sv_pass2.tsv`, `cohort_cna_pass2.tsv`, `cohort_snv.tsv`); `COHORT_MERGE_SV` clusters the tiered SV loci across samples with Jasmine (see `cohort_merge_sv/` below); pass 2 re-renders the same report with the merge staged, so the Overview page gains a **Cohort recurrent SVs (Jasmine merge)** card and the tiered SV table (and the published `cohort_sv_pass2.tsv`) carry five recurrence columns joined by sample and record ID: `cohort_recurrent`, `n_any`, `n_tiered`, `cluster_span`, `cluster_id`. On pass 1 these columns are present but NA.
+
 Output: `results/sv_report/index.html`
 
 ---
@@ -285,10 +287,11 @@ nextflow run Meshinchi-Lab/lrwgs-somatic-anno-nf \
 | `--include_cache` | `false` | Auto-download VEP cache when `vep_cache` is null |
 | `--sv_vcf` | `data/gnomad_sv_cnv/gnomad.v4.1.sv.sites.vcf.gz` | gnomAD SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
 | `--sv_clinvar` | `data/clinvar/nstd102.GRCh38.variant_call.vcf.gz` | ClinVar SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
+| `--sv_reference_filter_policy` | `filter` | What to do when `sv_vcf` / `sv_clinvar` contain non-PASS or REMOVE-labelled records: `filter` (annotate against the PASS-only subset), `fail` (abort), `warn` (report only, use as supplied). A per-file census is always written to `reference/sv_filter_check/` |
 | `--species` | `homo_sapiens` | VEP species |
 | `--cache_version` | `115` | VEP cache version |
 
-> **Note:** `sv_vcf` and `sv_clinvar` must be provided as bgzipped (`.vcf.gz`) files with a co-located tabix index (`.vcf.gz.tbi`).
+> **Note:** `sv_vcf` and `sv_clinvar` must be provided as bgzipped (`.vcf.gz`) files with a co-located tabix index (`.vcf.gz.tbi`). They are checked, and by default reduced to PASS records, before VEP sees them (`--sv_reference_filter_policy`); the raw files on disk are never modified.
 
 ---
 
@@ -478,7 +481,14 @@ results/
 ├── annotsv/
 │   └── setupuseranno/     # pre-processed AnnotSV reference with user BED annotations
 ├── filter_sv/             # vembrane-filtered VCF (*.merged.annotated.filtered.pass2.vcf.gz + .tbi)
-├── sv_report/             # cohort-level Quarto HTML report (index.html)
+├── reference/
+│   ├── sv_filter_check/   # FILTER census + verdict per SV reference VCF (gnomAD-SV, ClinVar-SV)
+│   ├── civic/             # CIViC VCF lifted to GRCh38
+│   └── rescue/            # SNV rescue BED
+├── cohort/                # per-sample ID-prefixed + region-restricted pre-filter VCFs and record tables (cohort merge inputs)
+├── jasmine/               # raw Jasmine merged VCF
+├── cohort_merge_sv/       # cohort_sv.regions.bed, cohort.sv.merged.vcf.gz, cohort_sv_recurrent.tsv (+ .map.tsv)
+├── sv_report/             # cohort-level Quarto HTML report (index.html) + cohort_{sv,cna}_pass2.tsv, cohort_snv.tsv
 └── pipeline_info/         # execution timeline, report, trace, DAG
 ```
 

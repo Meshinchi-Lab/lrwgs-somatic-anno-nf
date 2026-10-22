@@ -14,6 +14,7 @@
 #
 #   docker build --check docker/sv_report_index          # Dockerfile lint, no build
 #   docker build \
+#     --platform linux/amd64 \
 #     --build-arg IMAGE_REVISION="$(git rev-parse HEAD)" \
 #     --build-arg IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 #     --provenance=true --sbom=true \

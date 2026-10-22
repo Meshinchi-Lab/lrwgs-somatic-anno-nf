@@ -188,17 +188,10 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
         MERGE_SV.out.savana_vcf
     )
 
-    // NOTE: sv_vcf and sv_clinvar must be provided as bgzipped (.vcf.gz) + tabix-indexed (.vcf.gz.tbi) files
-    def sv_custom_files = []
-    if ( params.sv_vcf ) {
-        sv_custom_files << file(params.sv_vcf,          checkIfExists: true)
-        sv_custom_files << file("${params.sv_vcf}.tbi", checkIfExists: true)
-    }
-    if ( params.sv_clinvar ) {
-        sv_custom_files << file(params.sv_clinvar,          checkIfExists: true)
-        sv_custom_files << file("${params.sv_clinvar}.tbi", checkIfExists: true)
-    }
-    def sv_vcf_ch = Channel.value( sv_custom_files )
+    // NOTE: sv_vcf and sv_clinvar must be provided as bgzipped (.vcf.gz) + tabix-indexed (.vcf.gz.tbi) files.
+    // They are no longer passed to VEP straight from params: PREPARE_REFERENCES runs
+    // SV_REFERENCE_FILTER_CHECK on each (FILTER census; PASS-only subset under the
+    // default sv_reference_filter_policy) and emits the checked [vcf, tbi, ...] list.
 
     // VEP extra plugin/annotation files (merged with any sv_vcf / sv_clinvar custom files)
     def vep_extra_files = (params.vep_extra_files ? params.vep_extra_files.collect { file(it, checkIfExists: true) } : [] ) 
@@ -220,6 +213,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     def ch_annotsv_ann          = PREPARE_REFERENCES.out.annotsv_annotations
     def ch_candidate_genes_file = PREPARE_REFERENCES.out.candidate_genes_file
     def candidate_genes         = PREPARE_REFERENCES.out.candidate_genes
+    def sv_vcf_ch               = PREPARE_REFERENCES.out.sv_custom_files   // Channel.value( [vcf, tbi, ...] ) or []
 
     ANNOTATIONS_SV(
         MINDA_ANNOTATIONS.out.annotated_severus_vcf,

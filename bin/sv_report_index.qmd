@@ -164,14 +164,115 @@ strip_infotuple <- function(s) {
   s
 }
 
+# VCF INFO percent-encoding (VCF 4.3 section 1.2). VEP --custom keeps the
+# source VCF's encoding, so ClinVar labels arrive as "Likely%20pathogenic".
+# %25 is decoded last so a decoded "%" is not re-expanded.
+vcf_pct_decode <- function(x) {
+  str_replace_all(as.character(x), c(
+    "%20" = " ", "%2C" = ",", "%3B" = ";", "%3D" = "=", "%3A" = ":",
+    "%7C" = "|", "%26" = "&", "%25" = "%"))
+}
+
 # Clean vembrane's TSV-encoded ClinVar_SV_CLNSIG cell into a semicolon-joined
-# list of unique significance labels. VEP's --custom for the ClinVar SV VCF emits per-overlap CLNSIG values wrapped in double quotes and joined with "&", e.g. `"Pathogenic"&"Pathogenic"&"Likely%20pathogenic"&"Benign"`. 
+# list of unique significance labels. VEP's --custom for the ClinVar SV VCF emits per-overlap CLNSIG values wrapped in double quotes and joined with "&", e.g. `"Pathogenic"&"Pathogenic"&"Likely%20pathogenic"&"Benign"`.
 clean_clinvar_clnsig <- function(x) {
   if (is.na(x) || !nzchar(x)) return("")
   s <- str_replace_all(as.character(x), '"', '')
-  parts <- str_split(s, "&")[[1]] |> str_trim()
+  parts <- str_split(s, "&")[[1]] |> str_trim() |> vcf_pct_decode()
   parts <- parts[nzchar(parts)]
   paste(unique(parts), collapse = "; ")
+}
+
+# Compact a multi-value annotation cell ("&" from VEP --custom, "|" from
+# AnnotSV Gene_name, ";" from an earlier clean-up) into unique, decoded
+# labels joined by "; ". Beyond `max_show` items the rest is folded into
+# "... (+n more)" with the full list in a hover tooltip. Returns HTML, so it
+# belongs in tables rendered with escape = FALSE. Needed because a 10-Mb DEL
+# carries 130 pipe-joined gene symbols and an SV overlapping 50 ClinVar
+# records carries 50 copies of "Pathogenic": as a single unbreakable token
+# either one turns the row into a 1,000-px wall (observed 2026-10-22).
+compact_list_cell <- function(x, max_show = 6L, sep = "[&|;]") {
+  vapply(as.character(x), function(s) {
+    if (is.na(s) || !nzchar(s)) return("")
+    parts <- str_split(str_replace_all(s, '"', ""), sep)[[1]] |>
+      str_trim() |> vcf_pct_decode()
+    parts <- unique(parts[nzchar(parts) & parts != "."])
+    if (length(parts) <= max_show)
+      return(htmltools::htmlEscape(paste(parts, collapse = "; ")))
+    sprintf('<span title="%s">%s &hellip; (+%d more)</span>',
+            htmltools::htmlEscape(paste(parts, collapse = "; "), attribute = TRUE),
+            htmltools::htmlEscape(paste(parts[seq_len(max_show)], collapse = "; ")),
+            length(parts) - max_show)
+  }, character(1), USE.NAMES = FALSE)
+}
+
+# Re-enable DT column filters that DT disabled because the column holds a
+# single observed value. DT writes `disabled=""` on the filter <input> of any
+# such column (DT 0.34, datatables.R filterRow) and its JS keeps that state
+# (datatables.js: `$input.prop('disabled', !searchable || props.disabled)`),
+# while the hidden <select data-options=[levels]> that drives the factor
+# picker is still emitted. On a one-tier fixture (every SV row T1, every SNV
+# row T2) the tier filter therefore looks broken even though the column is a
+# proper factor; stripping the attribute gives a working picker whose levels
+# are the declared tier levels (observed 2026-10-22, user-reported twice).
+# Logical columns (cohort_recurrent) get the same treatment: DT types them
+# like a factor with a true/false picker. Numeric columns are left alone:
+# their single-valued slider has min == max and noUiSlider refuses to build it.
+dt_enable_filters <- function(dt, types = c("factor", "character", "logical")) {
+  fh <- dt$x$filterHTML
+  if (is.null(fh) || !nzchar(fh)) return(dt)
+  # One substitution per <td data-type="factor|character"> cell: the tempered
+  # dot `(?:(?!</td>).)*?` keeps the match inside the cell, so a numeric
+  # column's slider input is never touched. (A strsplit() on a zero-width
+  # lookahead is NOT usable here -- R consumes one character per split.)
+  pat <- sprintf('(?s)(<td data-type="(?:%s)"(?:(?!</td>).)*?) disabled=""',
+                 paste(types, collapse = "|"))
+  dt$x$filterHTML <- gsub(pat, "\\1", fh, perl = TRUE)
+  dt
+}
+
+# Display guard for the wide variant tables (SV / CNA / SNV / recurrence /
+# per-sample summary). Body cells are `white-space: nowrap` (dt-readability
+# CSS): with wrapping allowed, the auto table layout puts every column at its
+# minimum width and every multi-word value wraps on every space (observed
+# 2026-10-22: 70-376 px rows on the SV page, one row visible per card). With
+# nowrap the table grows instead and scrollX scrolls it. Two things then
+# have to be handled in the DATA, because max-width is not honoured on table
+# cells in auto layout:
+#   * a plain-text column holding any value longer than `wrap_at` characters
+#     is wrapped in <div class="dt-wrap"> (CSS: max-width 320 px, normal
+#     wrapping), so one verbose column (ST17_hit, Gene_name_display,
+#     P_gain_source) cannot push the table to several thousand px;
+#   * any whitespace-free token longer than `max_chars` (an INS ALT sequence,
+#     an un-compacted ID list) is cut with an ellipsis and the full token
+#     kept in a hover tooltip.
+# Columns that already hold HTML (link columns, compact_list_cell() output)
+# and non-character columns (the tier factor, numbers) are left alone.
+# escape = FALSE tables only. The CSV / Excel buttons export the visible text
+# with HTML stripped, so a shortened token is what lands in a download -- the
+# untruncated values are in the cohort_*.tsv outputs.
+dt_guard_cells <- function(df, wrap_at = 40L, max_chars = 60L) {
+  esc <- htmltools::htmlEscape
+  cap1 <- function(s) {
+    toks <- strsplit(s, " ", fixed = TRUE)[[1]]
+    toks <- vapply(toks, function(t) {
+      if (nchar(t) <= max_chars) return(esc(t))
+      sprintf('<span title="%s">%s&hellip;</span>',
+              esc(t, attribute = TRUE), esc(substr(t, 1L, max_chars - 1L)))
+    }, character(1), USE.NAMES = FALSE)
+    paste(toks, collapse = " ")
+  }
+  guard_col <- function(v) {
+    n <- nchar(v); n[is.na(n)] <- 0L
+    if (!any(n > wrap_at)) return(v)   # short column: left exactly as it was
+    out <- vapply(v, function(s) {
+      if (is.na(s) || !nzchar(s)) return("")
+      if (any(nchar(strsplit(s, " ", fixed = TRUE)[[1]]) > max_chars)) cap1(s) else esc(s)
+    }, character(1), USE.NAMES = FALSE)
+    paste0('<div class="dt-wrap">', out, "</div>")
+  }
+  is_plain <- function(v) is.character(v) && !any(grepl("<[A-Za-z][^>]*>", v))
+  dplyr::mutate(df, dplyr::across(dplyr::where(is_plain), guard_col))
 }
 
 # Vectorized breakpoint formatter for the DT `breakpoint` column.
@@ -820,11 +921,12 @@ user_cols_regex <- build_user_cols_regex()
 ```
 
 ```{r dt-readability, results='asis'}
-# Cyborg theme renders the page in dark mode (black body, light grey text).
-# DT tables inherit that styling and become unreadable (black on dark grey).
-# Force the table cell area to white with dark text while keeping the
-# surrounding chrome (filter / info / pagination / column-search) light so
-# it stays readable against the dark page background.
+# Report-wide DT styling. The dashboard theme is `cerulean` (light); the
+# rules below pin the table cell area to white-on-dark-text so the tables
+# read the same under any Bootswatch theme, and size / wrap cells for 20-30
+# column variant tables. Rules that formatStyle() must be able to override
+# (cell background / text colour -- the tier and SVTYPE pills) are NOT
+# marked !important: an !important stylesheet rule beats an inline style.
 cat('
 <style>
   /*  Layout: width is handled per-DT-chunk via `#| column: screen-inset`
@@ -851,16 +953,35 @@ cat('
   }
   table.dataTable thead th, table.dataTable tbody td { padding: 4px 6px !important; }
 
-  /*  Cell wrapping: allow long gene lists / coordinate strings to wrap
-     instead of bulldozing horizontal layout. max-width caps cell width
-     while word-break lets multi-element values break at any character.  */
+  /*  Cell wrapping. Body cells do NOT wrap: with wrapping allowed the auto
+     table layout puts every column at its minimum width and every
+     multi-word value wraps on every space, so rows were 70-990 px tall and
+     cards showed 0-2 rows (observed 2026-10-22; `overflow-wrap: anywhere`
+     made it worse by letting columns shrink to one character). With nowrap
+     the table grows and, every wide table having scrollX = TRUE, the excess
+     becomes a horizontal scroll bar. max-width is not honoured on table
+     cells in auto layout, so long text is handled in the DATA:
+     dt_guard_cells() wraps verbose plain-text columns in <div class="dt-wrap">
+     (capped at 320 px, wraps normally) and shortens >60-character tokens;
+     compact_list_cell() folds 100-gene / 50-label lists. Narrow
+     dom = "t" reference tables opt back into wrapping with class
+     "dt-wrapcells".  */
   table.dataTable tbody td {
-    white-space: normal !important;
-    word-break: break-word !important;
-    overflow-wrap: anywhere !important;
-    max-width: 320px;
+    white-space: nowrap !important;
     vertical-align: top !important;
   }
+  table.dataTable tbody td .dt-wrap,
+  table.dataTable.dt-wrapcells tbody td {
+    white-space: normal !important;
+    overflow-wrap: break-word;
+    word-break: normal;
+  }
+  /* A fixed width, not max-width: once the table is wider than its container
+     the auto layout gives every column its MIN-content width, and a
+     max-width box\'s min-content is its longest word (136 px for a gene
+     list), so the text re-wrapped into 19 lines. A fixed 320 px makes
+     min-content = max-content = 320. */
+  table.dataTable tbody td .dt-wrap { display: block; width: 320px; }
   table.dataTable thead th {
     white-space: normal !important;
     vertical-align: bottom !important;
@@ -881,30 +1002,35 @@ cat('
     border-bottom: 2px solid #495057 !important;
   }
 
-  /*  Theme: cell backgrounds (light) on the dark cyborg body  */
-  table.dataTable { background-color: #ffffff !important; color: #212529 !important; }
+  /*  Theme: light cells, dark text. Deliberately NOT !important on
+     background-color / color: DT::formatStyle() applies the tier / SVTYPE
+     pills as INLINE styles on the cell, and an !important stylesheet rule
+     outranks an inline style (observed 2026-10-22: every pill rendered as a
+     plain grey cell). DataTables 1.13 stripes / hovers with a translucent
+     inset box-shadow, not background-color, so these rules do not fight it.  */
+  table.dataTable { background-color: #ffffff; color: #212529; }
   table.dataTable thead th,
-  table.dataTable thead td { background-color: #e9ecef !important; color: #212529 !important;
+  table.dataTable thead td { background-color: #e9ecef; color: #212529;
                              border-bottom: 2px solid #adb5bd !important; }
-  table.dataTable tbody tr td { background-color: #ffffff !important; color: #212529 !important; }
+  table.dataTable tbody tr td { background-color: #ffffff; color: #212529; }
   table.dataTable tbody tr.odd td,
   table.dataTable.stripe tbody tr.odd > td,
-  table.dataTable.display tbody tr.odd > td { background-color: #f1f3f5 !important; }
-  table.dataTable tbody tr:hover td { background-color: #dee2e6 !important; }
+  table.dataTable.display tbody tr.odd > td { background-color: #f1f3f5; }
+  table.dataTable tbody tr:hover td { background-color: #dee2e6; }
   /* Per-column search row inside thead */
   table.dataTable thead input,
   table.dataTable thead select { background-color: #ffffff !important; color: #212529 !important;
                                  border: 1px solid #ced4da !important; }
 
-  /* Wrapper chrome — keep light text against the dark page */
-  .dataTables_wrapper { color: #f8f9fa !important; padding: 4px 0; }
+  /* Wrapper chrome (search label, info line, pagination): dark text on the light page */
+  .dataTables_wrapper { color: #212529; padding: 4px 0; }
   .dataTables_filter label,
   .dataTables_length label,
-  .dataTables_info { color: #f8f9fa !important; }
+  .dataTables_info { color: #212529; }
   .dataTables_filter input,
-  .dataTables_length select { background-color: #ffffff !important; color: #212529 !important;
-                              border: 1px solid #ced4da !important; }
-  .dataTables_paginate .paginate_button { color: #f8f9fa !important; }
+  .dataTables_length select { background-color: #ffffff; color: #212529;
+                              border: 1px solid #ced4da; }
+  .dataTables_paginate .paginate_button { color: #212529 !important; }
   .dataTables_paginate .paginate_button.current,
   .dataTables_paginate .paginate_button:hover { background: #495057 !important;
                                                 color: #ffffff !important; border-color: #6c757d !important; }
@@ -913,6 +1039,46 @@ cat('
                           border: 1px solid #6c757d !important; }
 </style>
 ')
+
+# ── Driver-tier display helpers (shared by the SV / CNA / SNV / recurrent tables) ──
+# Tier is carried as a FACTOR "T1"/"T2"/"T3" in every display frame and coloured
+# with DT::formatStyle(), not with a JS render() that injects <span> HTML:
+#   * the global search box and the column filter match on "T1" because the
+#     DATA is "T1"; the column filter is a <select> of the levels; RowGroup
+#     headers and the CSV / Excel exports show plain "T1" -- no badge markup
+#     leaks into any data path.
+#   * DT disables a column filter when the column has a single observed value,
+#     whatever its type (DT:::columnFilters: `length(unique(d)) <= 1`). On a
+#     fixture where every SV is T1 the tier filter is greyed out BY DESIGN and
+#     enables itself as soon as a second tier is present.
+tier_levels  <- c("T1", "T2", "T3")
+tier_palette <- c(T1 = "#2CA02C", T2 = "#D68910", T3 = "#6c757d")
+tier_factor  <- function(x) {
+  x <- as.character(x)
+  x <- ifelse(is.na(x) | !nzchar(x), NA_character_, paste0("T", sub("^T", "", x)))
+  factor(x, levels = tier_levels)
+}
+# Pill styling for a tier column and, optionally, a type column (SVTYPE /
+# CNA_TYPE) keyed on a named palette. Pure CSS on the cell -- no HTML in data.
+dt_style_pills <- function(dt, tier_col = "driver_tier",
+                           type_col = NULL, type_palette = NULL) {
+  # formatStyle() errors on a column name the table does not have; the tier
+  # column is optional in some frames (recurrence TSV from an older module).
+  .cols <- names(dt$x$data)
+  if (tier_col %in% .cols)
+    dt <- DT::formatStyle(dt, tier_col,
+      backgroundColor = DT::styleEqual(names(tier_palette), unname(tier_palette)),
+      color = "#ffffff", fontWeight = "bold", borderRadius = "10px",
+      textAlign = "center")
+  if (!is.null(type_col) && !is.null(type_palette) && type_col %in% .cols)
+    dt <- DT::formatStyle(dt, type_col,
+      backgroundColor = DT::styleEqual(names(type_palette), unname(type_palette)),
+      color = "#ffffff", fontWeight = "bold", borderRadius = "4px",
+      textAlign = "center")
+  # Every pill-styled table is a reviewer-facing variant table whose tier
+  # column must stay filterable even when the cohort has one tier.
+  dt_enable_filters(dt)
+}
 ```
 
 ```{r parse-annotsv}
@@ -1079,6 +1245,11 @@ qmd_computed_defs <- tibble::tribble(
   "Gene_name_display","Semicolon-joined unique SYMBOL list, dedup'd from AnnotSV's full-mode + per-split-mode Gene_name concatenation",
   "Candidate_genes",  "Intersection of Gene_name with the user candidate-gene panel (params.candidate_genes)",
   "has_mate",         "Whether both ends of a BND event survived the filter (TRUE = mate pair present, FALSE = orphaned BND)",
+  "cluster_id",       "Jasmine cluster this record belongs to (ID of the representative record in cohort.sv.merged.vcf.gz, from COHORT_MERGE_SV); NA when the cohort merge did not run (pass 1 / run_cohort_merge_sv=false)",
+  "n_tiered",         "Number of cohort samples in which this cluster is a Tier 1/2/3 call in this report (JASMINE_CLUSTER_MAP)",
+  "n_any",            "Number of cohort samples with ANY pre-filter evidence in the cluster (Jasmine INFO/SUPP); n_any > n_tiered means the SV was called but filtered out in other samples",
+  "cluster_span",     "Observed cluster width, max(POS) - min(POS) across cluster members in bp; values well above cohort_sv_max_dist flag single-linkage chaining",
+  "cohort_recurrent", "TRUE when n_tiered >= params.cohort_sv_min_recurrence (default 2)",
   "ST17_hit",         "One-line summary of the highest-scored SVTYPE-matched ST17 T-ALL recurrence BED hit(s)",
   "ST17_name",        "Top-3 ST17 hit names (by score), pipe-outside-parens joined",
   "ST17_score",       "Top-3 ST17 hit scores, paired positionally with ST17_name",
@@ -1151,6 +1322,9 @@ render_data_dict <- function(display_df, dict_tbl, caption = NULL) {
   DT::datatable(
     tibble::tibble(Column = cols, Kind = ftype, Definition = desc),
     caption   = caption,
+    # Three-column prose table without scrollX: let Definition wrap (body
+    # cells are nowrap report-wide; see dt-readability).
+    class     = "display dt-wrapcells",
     filter    = "none", rownames = FALSE, width = "100%",
     options   = list(dom = "t", pageLength = 100, ordering = FALSE,
                      autoWidth = TRUE,
@@ -1237,6 +1411,83 @@ if (nrow(pass2_long) > 0) {
       ACMG_class_clean = acmg_factor(ACMG_class),
       ranking_score    = suppressWarnings(as.numeric(scalar_first(AnnotSV_ranking_score)))
     )
+}
+```
+
+```{r cohort-recurrence-load}
+#| echo: false
+#| warning: false
+
+# ── COHORT_MERGE_SV recurrence table (pass 2 only) ─────────────────────────
+# Loaded HERE, ahead of the SV table chunk, because the tiered SV table joins
+# the per-(SAMPLE, ID) recurrence columns in before it is written out and
+# displayed. The Overview page's "Cohort recurrent SVs" card reuses the same
+# object (chunk cohort-merge-load). On pass 1 params$cohort_recurrent_tsv is
+# "" -- the merge has not run yet -- so jm_recur stays NULL and the SV table
+# carries NA recurrence columns; pass 2 overwrites pass 1's report and TSV.
+# Interpretation of the two counts (modules/local/jasmine_cluster_map/main.nf):
+#   n_tiered = samples where this SV was a Tier 1/2/3 call
+#   n_any    = samples with ANY evidence in the cluster (Jasmine INFO/SUPP)
+jm_recur <- NULL
+jm_note  <- NULL
+jm_join  <- NULL
+
+.crt <- params$cohort_recurrent_tsv
+if (is.character(.crt) && length(.crt) == 1L && nzchar(.crt) && file.exists(.crt)) {
+  .tbl <- try(suppressWarnings(readr::read_tsv(
+    .crt, show_col_types = FALSE, progress = FALSE)), silent = TRUE)
+  if (inherits(.tbl, "try-error")) {
+    jm_note <- sprintf("Could not read <code>%s</code>.", basename(.crt))
+  } else if (nrow(.tbl) == 0) {
+    jm_note <- paste0(
+      "COHORT_MERGE_SV ran, but no cluster reached the recurrence threshold ",
+      "(<code>cohort_sv_min_recurrence</code>). Expected on a two-sample test set.")
+  } else {
+    jm_recur <- .tbl
+  }
+} else {
+  jm_note <- paste0(
+    "Cohort SV merge results are not part of this render. Either this is ",
+    "<b>pass 1</b> of the two-pass render &mdash; it produces the tiered table ",
+    "that COHORT_MERGE_SV consumes, and pass 2 re-renders this page with the ",
+    "merge results &mdash; or <code>run_cohort_merge_sv</code> is false.")
+}
+
+# Per-(SAMPLE, ID) lookup for the tiered SV table. JASMINE_CLUSTER_MAP keys
+# every record as source_id = "<SAMPLE>_<ID>" (COHORT_SV_SET_ID prefixes the
+# VCF IDs with meta.id, which BCFTOOLS_REHEADER made equal to SAMPLE), so the
+# ID is source_id with its own sample prefix removed. Only TIERED rows can
+# match a row of this report; RESCUED rows (sub-threshold calls recovered
+# from the pre-filter VCF) exist solely in the long recurrence table.
+rec_cols <- c("cluster_id", "n_tiered", "n_any", "cluster_span", "cohort_recurrent")
+.need    <- c("source_id", "sample", "record_class", rec_cols)
+if (!is.null(jm_recur) && all(.need %in% names(jm_recur))) {
+  jm_join <- jm_recur |>
+    dplyr::filter(record_class == "TIERED") |>
+    dplyr::mutate(
+      .pfx = paste0(sample, "_"),
+      ID   = ifelse(startsWith(as.character(source_id), .pfx),
+                    substring(as.character(source_id), nchar(.pfx) + 1L),
+                    NA_character_)) |>
+    dplyr::filter(!is.na(ID)) |>
+    dplyr::transmute(
+      SAMPLE           = as.character(sample),
+      ID               = ID,
+      cluster_id       = as.character(cluster_id),
+      n_tiered         = suppressWarnings(as.integer(n_tiered)),
+      n_any            = suppressWarnings(as.integer(n_any)),
+      cluster_span     = suppressWarnings(as.integer(cluster_span)),
+      cohort_recurrent = as.logical(toupper(as.character(cohort_recurrent))))
+  .dup <- duplicated(jm_join[, c("SAMPLE", "ID")])
+  if (any(.dup)) {
+    warning(sprintf("cohort-recurrence-load: %d duplicated (SAMPLE, ID) keys in %s; keeping the first",
+                    sum(.dup), basename(.crt)))
+    jm_join <- jm_join[!.dup, , drop = FALSE]
+  }
+  message(sprintf("cohort-recurrence-load: %d TIERED rows available for the SV-table join", nrow(jm_join)))
+} else if (!is.null(jm_recur)) {
+  warning(sprintf("cohort-recurrence-load: %s lacks %s; SV table gets NA recurrence columns",
+                  basename(.crt), paste(setdiff(.need, names(jm_recur)), collapse = ", ")))
 }
 ```
 
@@ -1788,6 +2039,26 @@ pass2_clean <- pass2_clean |>
 # clinical context — sex, age, EGIL, ETP, karyotype, driver fusions, ITD, etc.
 # No-op when the metadata CSV wasn't supplied.
 pass2_clean <- merge_sample_metadata(pass2_clean)
+
+# ── Cohort recurrence columns (pass 2) ──────────────────────────────────────
+# Left join by (SAMPLE, ID) from the COHORT_MERGE_SV recurrence table (see
+# chunk cohort-recurrence-load). Every tiered row keeps its place; a row with
+# NA cluster_id was not clustered by Jasmine (expected only when the merge
+# did not run). The five columns exist on BOTH passes so cohort_sv_pass2.tsv
+# has one schema: NA on pass 1, populated on pass 2.
+if (!is.null(jm_join)) {
+  pass2_clean <- pass2_clean |>
+    select(-any_of(rec_cols)) |>
+    left_join(jm_join, by = c("SAMPLE", "ID"))
+  message(sprintf("pass2-clean: recurrence join matched %d / %d tiered SV rows (%d cohort_recurrent)",
+                  sum(!is.na(pass2_clean$cluster_id)), nrow(pass2_clean),
+                  sum(pass2_clean$cohort_recurrent %in% TRUE)))
+} else {
+  pass2_clean <- pass2_clean |>
+    select(-any_of(rec_cols)) |>
+    mutate(cluster_id = NA_character_, n_tiered = NA_integer_, n_any = NA_integer_,
+           cluster_span = NA_integer_, cohort_recurrent = NA)
+}
 
 # Emit the cohort-level SV pass2 TSV (full schema, RE_gene retained,
 # Closest_left/Closest_right + new driver_tier / tier_score / ST17_hit /
@@ -2534,7 +2805,12 @@ lollipop_link_display <- if (nrow(lollipop_variants) == 0) tibble::tibble() else
 
 
 
-# Overview
+<!-- scrolling="true": this page holds six rows. With the dashboard default
+     (`scrolling: false`) every page must fit ONE viewport, and the flex layout
+     measured on 2026-10-22 gave the two `.fill` table cards 51 px each (widget 15 px)
+     -- the tables rendered fully inside and were clipped to a sliver, i.e. "blank".
+     On a scrolling page `.fill` has nothing to fill, so each card gets a height. -->
+# Overview {scrolling="true"}
 
 ## Row {height="120px"}
 
@@ -2575,7 +2851,7 @@ list(icon = "clipboard-data", color = "secondary",
              vb_count("snv_long", function(df) rep(TRUE, nrow(df))))
 ```
 
-## Row {.fill}
+## Row {height="560px"}
 
 ### Cohort DISCO plot {title="Cohort DISCO plot"}
 
@@ -2624,9 +2900,9 @@ cat(sprintf(
 ```
 
 
-## Row {.fill}
+## Row {height="620px"}
 
-### SV Protein Paint {title="SV Protein Paint (gene fusion)"}
+### SV fusion export {title="SV fusion export (ProteinPaint svfusion format)"}
 
 ```{r sv-proteinpaint-build}
 #| echo: false
@@ -2794,59 +3070,43 @@ if (!is.null(pp_sv_fusion) && nrow(pp_sv_fusion) > 0) {
   DT::datatable(
     pp_sv_fusion,
     rownames   = FALSE,
-    extensions = c("Buttons", "Scroller"),
+    # No Scroller here. Quarto dashboards render DT with fillContainer=TRUE,
+    # which DISABLES paging (bPaginate=false on every widget); Scroller requires
+    # paging and logs "Pagination must be enabled for Scroller" then draws
+    # nothing -- the table came out blank (observed 2026-10-08 render). The
+    # fill container already provides vertical scrolling.
+    extensions = "Buttons",
     options = list(
       dom = "Bfrtip", buttons = list("copy", list(extend = "csv", text = "Download svfusion")),
-      scrollY = 360, scroller = TRUE, scrollX = TRUE, pageLength = 25
+      scrollX = TRUE
     ),
     caption = htmltools::tags$caption(
       style = "caption-side: top; text-align: left; font-size:0.9em;",
       htmltools::HTML(paste0(
-        "ProteinPaint <b>svfusion</b> input &mdash; Tier 1 + Tier 2, one row per event. ",
-        "Positions are <b>0-based</b> per the format spec. ",
-        "Load at <code>https://proteinpaint.stjude.org/FusionEditor/</code> ",
-        "or the <code>?appcard=genefusion</code> card."))))
+        "ProteinPaint <b>svfusion</b> track input &mdash; Tier 1 + Tier 2, one row per event. ",
+        "Positions are <b>0-based</b> per the SV/fusion-transcript format spec. ",
+        "Intergenic breakends carry no gene/isoform; non-coding breakends no isoform."))))
 } else {
   htmltools::HTML(paste0("<p style='color:#666;'>", pp_sv_note, "</p>"))
 }
 ```
 
-::: {#sv_fusion_pp style="min-height:520px; width:100%; margin-top:10px;"}
-:::
-
-<script src="https://proteinpaint.stjude.org/bin/proteinpaint.js" charset="utf-8"></script>
-<script>
-// Fusion Editor embed. Key names are case-sensitive; `input` (NOT `text`) is the
-// documented parameter and takes the entire file content as one string.
-// Ref: Embedding.md "Fusion editor" / fusioneditor:{}
-//      live example https://proteinpaint.stjude.org/examples/fusioneditor.html
-(function () {
-  var ppInput = `r pp_sv_input_json`;
-  if (!ppInput) return;                       // no Tier 1/2 events -> render nothing
-  runproteinpaint({
-    host: "`r pp_host`",
-    holder: document.getElementById("sv_fusion_pp"),
-    noheader: true,
-    nobox: true,
-    genome: "`r pp_genome`",
-    fusioneditor: {
-      input: ppInput,
-      dataname: "`r safe_cohort_label` Tier 1/2 SVs"
-    }
-  });
-})();
-</script>
-
+<!-- The FusionEditor embed that used to sit here was retired 2026-10-22. It drew a
+     fusion PROTEIN for every event, which is the wrong model for enhancer-hijacking
+     SVs (e.g. BCL11B -> TLX3), and in a live browser the app rejected the file
+     outright ("File header error: geneA missing": the editor wants camelCase
+     headers, not the svfusion track columns). The table above is the deliverable;
+     SV/CNA visualisation moves to GenomePaint (notes, REMAINING). -->
 ::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
-SV Protein Paint &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
+SV fusion export &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
 Genome build `r pp_genome`. BND mate pairs are collapsed to one event; INS is excluded
 (no second breakpoint); same-gene DEL/DUP/INV are excluded (intragenic, not a fusion).
 An isoform is given only where the breakpoint lies inside a protein-coding gene with an ENST/NM accession — otherwise it is blank per the svfusion spec, and an intergenic breakend has its gene blanked too.
 :::
 
-## Row {.fill}
+## Row {height="150px"}
 
-### Cohort recurrent SVs {title="Cohort recurrent SVs (Jasmine merge)"}
+### Cohort recurrence summary {title="Cohort recurrence summary (Jasmine merge)"}
 
 ```{r cohort-merge-load}
 #| echo: false
@@ -2866,8 +3126,9 @@ An isoform is given only where the breakpoint lies inside a protein-coding gene 
 # n_tiered=1, n_any>=2 -> RESCUE candidate: called confidently in one sample and
 #                         filtered out elsewhere despite supporting evidence.
 # n_tiered=1, n_any=1  -> no corroboration; private call or false positive.
-jm_recur    <- NULL
-jm_note     <- NULL
+# jm_recur / jm_note were loaded by chunk cohort-recurrence-load (ahead of the
+# SV table, which joins the recurrence columns in). Only the summary, the
+# display ordering and the merged-VCF header check are computed here.
 jm_summary  <- NULL
 jm_hdr_note <- NULL
 
@@ -2885,27 +3146,6 @@ jm_hdr_note <- NULL
     if (length(out) >= cap) break
   }
   out
-}
-
-.crt <- params$cohort_recurrent_tsv
-if (is.character(.crt) && length(.crt) == 1L && nzchar(.crt) && file.exists(.crt)) {
-  .tbl <- try(suppressWarnings(readr::read_tsv(
-    .crt, show_col_types = FALSE, progress = FALSE)), silent = TRUE)
-  if (inherits(.tbl, "try-error")) {
-    jm_note <- sprintf("Could not read <code>%s</code>.", basename(.crt))
-  } else if (nrow(.tbl) == 0) {
-    jm_note <- paste0(
-      "COHORT_MERGE_SV ran, but no cluster reached the recurrence threshold ",
-      "(<code>cohort_sv_min_recurrence</code>). Expected on a two-sample test set.")
-  } else {
-    jm_recur <- .tbl
-  }
-} else {
-  jm_note <- paste0(
-    "Cohort SV merge results are not part of this render. Either this is ",
-    "<b>pass 1</b> of the two-pass render &mdash; it produces the tiered table ",
-    "that COHORT_MERGE_SV consumes, and pass 2 re-renders this page with the ",
-    "merge results &mdash; or <code>run_cohort_merge_sv</code> is false.")
 }
 
 if (!is.null(jm_recur)) {
@@ -2961,24 +3201,49 @@ if (is.character(.cmv) && length(.cmv) == 1L && nzchar(.cmv) && file.exists(.cmv
 if (!is.null(jm_summary)) {
   knitr::kable(jm_summary, format = "html",
                table.attr = 'class="table table-sm" style="width:auto;"')
+} else {
+  htmltools::HTML(paste0("<p style='color:#666; margin:10px 0;'>", jm_note, "</p>"))
 }
 ```
+
+<!-- The recurrence DT gets a row of its own, and shares its card only with
+     the merged-VCF header note. When the summary kable, the DT and the note
+     were three cells under one heading in a single 620-px row, Quarto laid
+     them out as three cards and the table card came out 217 px tall with
+     zero rows visible (observed 2026-10-22). -->
+
+## Row {height="640px"}
+
+:::: {.card title="Cohort recurrent SVs (Jasmine merge)"}
 
 ```{r cohort-merge-table}
 #| echo: false
 #| column: screen-inset
 if (!is.null(jm_recur) && nrow(jm_recur) > 0) {
+  jm_display <- jm_recur |>
+    dplyr::mutate(
+      dplyr::across(dplyr::any_of("driver_tier"), tier_factor),
+      # gene_name is AnnotSV's "|"-joined Gene_name (every gene a large DEL
+      # spans; 130 symbols on the test fixture) and clinvar_clnsig is VEP's
+      # "&"-joined per-overlap CLNSIG (50 copies of "Pathogenic"); both arrive
+      # verbatim from JASMINE_CLUSTER_MAP. Compacted for display only --
+      # cohort_sv_recurrent.tsv keeps the full strings.
+      dplyr::across(dplyr::any_of(c("gene_name", "clinvar_clnsig")),
+                    compact_list_cell)) |>
+    dt_guard_cells()
   DT::datatable(
-    jm_recur,
+    jm_display,
     escape     = FALSE,
     filter     = "top",
     rownames   = FALSE,
     width      = "100%",
-    extensions = c("Buttons", "Scroller"),
+    # No Scroller: see the svfusion table -- dashboard fillContainer disables
+    # paging, Scroller requires it, result was an empty body.
+    extensions = "Buttons",
     options = list(
       dom     = "Bfrtip",
       buttons = list("copy", list(extend = "csv", text = "Download recurrence TSV")),
-      scrollY = 420, scroller = TRUE, scrollX = TRUE, pageLength = 25
+      scrollX = TRUE
     ),
     caption = htmltools::tags$caption(
       style = "caption-side: top; text-align: left; font-size:0.9em;",
@@ -2988,7 +3253,8 @@ if (!is.null(jm_recur) && nrow(jm_recur) > 0) {
         "tiered table, and RESCUED when it is a sub-threshold call recovered ",
         "from the pre-filter VEP VCF. <code>n_tiered</code> against ",
         "<code>n_any</code> separates over-filtering from lack of ",
-        "corroboration."))))
+        "corroboration.")))) |>
+    dt_style_pills()
 } else {
   htmltools::HTML(paste0("<p style='color:#666; margin:10px 0;'>", jm_note, "</p>"))
 }
@@ -2998,14 +3264,16 @@ if (!is.null(jm_recur) && nrow(jm_recur) > 0) {
 `r if (!is.null(jm_hdr_note)) htmltools::HTML(jm_hdr_note) else "Merged VCF not staged in this render."`
 :::
 
-## Row {height="240px"}
+::::
+
+## Row {height="380px"}
 
 ### Per-sample AnnotSV summary {title="Per-sample AnnotSV summary"}
 
 ```{r sample-stats-table}
 #| column: screen-inset
 DT::datatable(
-  stats_df,
+  dt_guard_cells(stats_df),
   escape     = FALSE,
   filter     = "top",
   rownames   = FALSE,
@@ -3285,59 +3553,40 @@ ggplotly(p_tier, tooltip = "text") |> config(displayModeBar = FALSE)
 # Display columns for the DT: full schema minus RE_gene
 # driver prioritization.
 display_cols <- c(
-  "SAMPLE", "sample_id", "driver_tier", "SVTYPE", "DETAILED_TYPE", "ALT",
+  "SAMPLE", "sample_id", "driver_tier", "cohort_recurrent", "n_any", "n_tiered",
+  "SVTYPE", "DETAILED_TYPE", "ALT",
   "breakpoint", "CytoBand_display", "has_mate", "SVLEN", "CALLER",
   "Gene_name_display", "Candidate_genes", "ST17_hit",
   "AnnotSV_ranking_score", "ACMG_class",
   "VAF", "hVAF", "DR", "DV", "TUMOUR_READ_SUPPORT", "TUMOUR_AF",
-  "ClinVar_SV_CLNSIG"
+  "ClinVar_SV_CLNSIG", "cluster_span", "cluster_id"
 )
 # sample_id (friendly cohort label) is joined in from sample_metadata via
 # merge_sample_metadata() earlier — silently absent when no metadata CSV.
+# The recurrence columns are shown only when the cohort merge contributed
+# (pass 2); on pass 1 / run_cohort_merge_sv=false they are all NA and hidden.
 display_cols <- intersect(display_cols, names(pass2_clean))
+if (is.null(jm_join)) display_cols <- setdiff(display_cols, rec_cols)
 
 # Sort: driver_tier ascending (T1 first), tier_score descending. higher-recurrence / more-candidates / higher-AnnotSV-rank first 
 
 
 pass2_display <- pass2_clean |>
   arrange(driver_tier, desc(tier_score), SVTYPE, SAMPLE) |>
-  select(all_of(display_cols))
+  select(all_of(display_cols)) |>
+  mutate(driver_tier = tier_factor(driver_tier),
+         # escape=FALSE is table-wide (link columns), so raw VCF symbolic ALTs
+         # such as <DEL> / <DUP> were parsed as HTML tags and rendered as empty
+         # cells (observed: 6 blank ALT cells in the 2026-10-08 render).
+         across(any_of("ALT"), htmltools::htmlEscape)) |>
+  # Wrap verbose columns (ST17_hit, Gene_name_display) at 320 px and shorten
+  # any >60-character token (INS ALT sequences); see dt_guard_cells() in setup.
+  dt_guard_cells()
 
-# svtype_colors palette is defined in the load-pass2 chunk
+# svtype_colors palette is defined in the load-pass2 chunk. Column indices are
+# 0-based for DataTables (rowGroup / order).
 svtype_col_js <- which(names(pass2_display) == "SVTYPE") - 1L
-
-# Build a JS render callback that wraps each SVTYPE cell value in a
-# pill-shaped span with an INLINE style attribute.
-# overrides cyborg theme's dark-mode cell defaults AND the broader white-bg
-# `!important` rules in the dt-readability chunk above
-svtype_render_js <- DT::JS(sprintf(
-  "function(data, type, row) {
-     if (type !== 'display' || data == null || data === '') return data;
-     var colors = %s;
-     var c = colors[data] || '#6c757d';
-     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
-            'font-weight:bold;padding:2px 8px;border-radius:4px;' +
-            'display:inline-block;min-width:36px;text-align:center;\">' +
-            data + '</span>';
-   }",
-  jsonlite::toJSON(as.list(svtype_colors), auto_unbox = TRUE)
-))
-
-# driver_tier badge palette  
-tier_colors <- c(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d")
-tier_col_js <- which(names(pass2_display) == "driver_tier") - 1L
-tier_render_js <- DT::JS(sprintf(
-  "function(data, type, row) {
-     if (type !== 'display' || data == null || data === '') return data;
-     var colors = %s;
-     var c = colors[String(data)] || '#6c757d';
-     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
-            'font-weight:bold;padding:2px 10px;border-radius:10px;' +
-            'display:inline-block;min-width:30px;text-align:center;\">' +
-            'T' + data + '</span>';
-   }",
-  jsonlite::toJSON(as.list(tier_colors), auto_unbox = TRUE)
-))
+tier_col_js   <- which(names(pass2_display) == "driver_tier") - 1L
 
 DT::datatable(
   pass2_display,
@@ -3355,13 +3604,10 @@ DT::datatable(
     # Group rows by driver_tier — one T1/T2/T3 header bar.
     rowGroup   = list(dataSrc = tier_col_js),
     # Initial sort: driver_tier ASC keeps rowGroup buckets contiguous; secondary sort of AnnotSV_ranking_score DESC within each tier 
-    order      = list(list(tier_col_js, "asc")),
-    columnDefs = list(
-      list(targets = svtype_col_js, render = svtype_render_js),
-      list(targets = tier_col_js,   render = tier_render_js)
-    )
+    order      = list(list(tier_col_js, "asc"))
   )
-)
+) |>
+  dt_style_pills(type_col = "SVTYPE", type_palette = svtype_colors)
 ```
 
 # CNA
@@ -3437,40 +3683,17 @@ cna_display_cols <- intersect(cna_display_cols, names(cna_pass2_clean))
 
 cna_pass2_display <- cna_pass2_clean |>
   arrange(driver_tier, desc(tier_score), CNA_TYPE, SAMPLE, CHROM, POS) |>
-  select(all_of(cna_display_cols))
+  select(all_of(cna_display_cols)) |>
+  mutate(driver_tier = tier_factor(driver_tier),
+         # symbolic <CNV> / <DEL> ALTs would parse as HTML tags under escape = FALSE
+         across(any_of("ALT"), htmltools::htmlEscape)) |>
+  dt_guard_cells()
 
 # Reuse the SVTYPE palette for CNA_TYPE (DUP / DEL share colors with SV side).
 cna_type_col_js <- which(names(cna_pass2_display) == "CNA_TYPE") - 1L
 cna_tier_col_js <- which(names(cna_pass2_display) == "driver_tier") - 1L
 
-# Reuse the SV driver_tier renderer palette (T1 green, T2 orange, T3 grey)
-# so the tier badge looks identical across SV / CNA / SNV tables.
-cna_tier_render_js <- DT::JS(sprintf(
-  "function(data, type, row) {
-     if (type !== 'display' || data == null || data === '') return data;
-     var colors = %s;
-     var c = colors[String(data)] || '#6c757d';
-     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
-            'font-weight:bold;padding:2px 10px;border-radius:10px;' +
-            'display:inline-block;min-width:30px;text-align:center;\">' +
-            'T' + data + '</span>';
-   }",
-  jsonlite::toJSON(list(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d"),
-                    auto_unbox = TRUE)
-))
-
-cna_type_render_js <- DT::JS(sprintf(
-  "function(data, type, row) {
-     if (type !== 'display' || data == null || data === '') return data;
-     var colors = %s;
-     var c = colors[data] || '#6c757d';
-     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
-            'font-weight:bold;padding:2px 8px;border-radius:4px;' +
-            'display:inline-block;min-width:36px;text-align:center;\">' +
-            data + '</span>';
-   }",
-  jsonlite::toJSON(as.list(svtype_colors), auto_unbox = TRUE)
-))
+# Tier / CNA_TYPE pills: CSS via dt_style_pills() (defined in dt-readability).
 
 DT::datatable(
   cna_pass2_display,
@@ -3486,13 +3709,10 @@ DT::datatable(
     scrollX    = TRUE,
     autoWidth  = TRUE,
     rowGroup   = list(dataSrc = cna_tier_col_js),
-    order      = list(list(cna_tier_col_js, "asc")),
-    columnDefs = list(
-      list(targets = cna_type_col_js, render = cna_type_render_js),
-      list(targets = cna_tier_col_js, render = cna_tier_render_js)
-    )
+    order      = list(list(cna_tier_col_js, "asc"))
   )
-)
+) |>
+  dt_style_pills(type_col = "CNA_TYPE", type_palette = svtype_colors)
 ```
 
 # SNV
@@ -3566,24 +3786,13 @@ snv_display_cols <- intersect(snv_display_cols, names(snv_long))
 # DT shows ALL SNVs sorted by driver_tier so T3 records 
 snv_display <- snv_long |>
   arrange(driver_tier, desc(tier_score), SAMPLE, CHROM, POS) |>
-  select(all_of(snv_display_cols))
+  select(all_of(snv_display_cols)) |>
+  mutate(driver_tier = tier_factor(driver_tier)) |>
+  dt_guard_cells()
 
 snv_tier_col_js <- which(names(snv_display) == "driver_tier") - 1L
 
-# Same green / orange / grey tier badge as SV + CNA tables
-snv_tier_render_js <- DT::JS(sprintf(
-  "function(data, type, row) {
-     if (type !== 'display' || data == null || data === '') return data;
-     var colors = %s;
-     var c = colors[String(data)] || '#6c757d';
-     return '<span style=\"background-color:' + c + ';color:#ffffff;' +
-            'font-weight:bold;padding:2px 10px;border-radius:10px;' +
-            'display:inline-block;min-width:30px;text-align:center;\">' +
-            'T' + data + '</span>';
-   }",
-  jsonlite::toJSON(list(`1` = "#2CA02C", `2` = "#D68910", `3` = "#6c757d"),
-                    auto_unbox = TRUE)
-))
+# Tier pills: CSS via dt_style_pills() (defined in dt-readability).
 
 DT::datatable(
   snv_display,
@@ -3593,10 +3802,10 @@ DT::datatable(
     dom = "Bfrtip", buttons = c("csv", "excel"),
     pageLength = 15, scrollX = TRUE, autoWidth = TRUE,
     rowGroup = list(dataSrc = snv_tier_col_js),
-    order = list(list(snv_tier_col_js, "asc")),
-    columnDefs = list(list(targets = snv_tier_col_js, render = snv_tier_render_js))
+    order = list(list(snv_tier_col_js, "asc"))
   )
 ) |>
+  dt_style_pills() |>
   # Round every VAF / allele-frequency column to 3 significant digits for
   # readability. Raw values (7+ decimals for gnomAD) survive in the cohort_snv.tsv
   # output for programmatic joins. `intersect(...)` guards against any of
@@ -3660,7 +3869,14 @@ cat("No Tier-1 SNVs with a resolvable gene SYMBOL for lollipop plots.\n")
 
 
 
-# Information
+# Information {scrolling="true"}
+
+<!-- Reference page: tier-scheme tables, column dictionaries, citations. On a
+     non-scrolling page the three tier-scheme cards were clipped after the T1
+     row and the column-dictionary card collapsed to its header (66 px for a
+     23-row table), observed 2026-10-22. Scrolling lets each card take its
+     natural height; the row heights below are minimums, not fractions of the
+     viewport. -->
 
 ## Row {height="40%"}
 
@@ -3707,13 +3923,15 @@ cat(dict_download_button("data_dict_sv", "SV"))
 # who needs the whole header set.
 # display_cols vector must stay in sync with the `pass2-table` chunk.
 sv_display_cols <- intersect(c(
-  "SAMPLE", "sample_id", "driver_tier", "SVTYPE", "DETAILED_TYPE", "ALT",
+  "SAMPLE", "sample_id", "driver_tier", "cohort_recurrent", "n_any", "n_tiered",
+  "SVTYPE", "DETAILED_TYPE", "ALT",
   "breakpoint", "CytoBand_display", "has_mate", "SVLEN", "CALLER",
   "Gene_name_display", "Candidate_genes", "ST17_hit",
   "AnnotSV_ranking_score", "ACMG_class",
   "VAF", "hVAF", "DR", "DV", "TUMOUR_READ_SUPPORT", "TUMOUR_AF",
-  "ClinVar_SV_CLNSIG"
+  "ClinVar_SV_CLNSIG", "cluster_span", "cluster_id"
 ), names(pass2_clean))
+if (!exists("jm_join") || is.null(jm_join)) sv_display_cols <- setdiff(sv_display_cols, rec_cols)
 
 render_data_dict(
   pass2_clean[, sv_display_cols, drop = FALSE], dict_sv,
