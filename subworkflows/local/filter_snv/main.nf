@@ -8,13 +8,19 @@
 //   A. CLNSIG pathogenic-leaning (clinical override; gene-agnostic)
 //   B. SCI Tier I/II somatic clinical impact (2024 fields)
 //   C. ONC oncogenic (2024 fields)
-//   D. Novel-variant path: HIGH/MODERATE IMPACT + both callers' VAFs above
-//      threshold + not benign + SIFT deleterious AND PolyPhen damaging
+//   D. Novel-variant path: HIGH/MODERATE IMPACT + VAF >= snv_min_vaf in at
+//      least ONE caller + not benign + SIFT deleterious AND PolyPhen damaging
 //      + on candidate gene panel
 //
-//   VAF gate: min() over whichever per-caller VAF fields are present, so a
-//   single-caller rescued variant is judged on its supporting caller rather
-//   than failing because the absent caller's field defaults to 0.0.
+//   VAF gate: max() over whichever per-caller VAF fields are present — the
+//   record is retained when EITHER ClairS-TO or DeepSomatic reports
+//   VAF >= snv_min_vaf. Rationale: a consensus record already required both
+//   callers to PASS the site (MERGE_SNV `isec -n+2`), and the two callers
+//   estimate VAF differently (ClairS-TO FORMAT/AF vs DeepSomatic FORMAT/VAF),
+//   so additionally requiring both estimates to clear the floor (the earlier
+//   min()) dropped subclonal calls that one caller placed just under it.
+//   A single-caller rescued record is judged on its supporting caller; a
+//   record with neither field present fails (`or [0.0]`).
 //
 // Hard gnomAD rarity filter (top-level AND):
 //   `(ANN.get("gnomADg_AF") or 0.0) < snv_gnomad_af_max` — the `or 0.0`
@@ -64,7 +70,7 @@ workflow FILTER_SNV {
             or
             (
                 ANN.get("IMPACT", "") in ("HIGH", "MODERATE")
-                and min([v for v in (INFO.get("CLAIRSTO_VAF"), INFO.get("DEEPSOMATIC_VAF")) if v is not None] or [0.0]) >= ${snv_min_vaf}
+                and max([v for v in (INFO.get("CLAIRSTO_VAF"), INFO.get("DEEPSOMATIC_VAF")) if v is not None] or [0.0]) >= ${snv_min_vaf}
                 and str(INFO.get("CLNSIG") or "").replace("(","").replace(")","").replace(chr(39),"").strip(", .") not in ("Benign", "Likely_benign")
                 and "deleterious" in str(ANN.get("SIFT") or "").lower()
                 and "damaging" in str(ANN.get("PolyPhen") or "").lower()

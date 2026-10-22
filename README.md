@@ -156,7 +156,7 @@ Single-pass vembrane filter over the fully-annotated SNV VCF.
 | A. ClinVar pathogenic-leaning | `CLNSIG` matches "Pathogenic" / "Likely_pathogenic" / "Pathogenic_low_penetrance" |
 | B. SCI Tier I / II somatic clinical impact | 2024 ClinVar `SCI` field not empty |
 | C. ClinVar oncogenic | `ONC` contains "Oncogenic" or "Likely_oncogenic" |
-| D. Novel-variant path | HIGH/MODERATE IMPACT + both `CLAIRSTO_VAF` and `DEEPSOMATIC_VAF` ≥ `params.snv_min_vaf` (default 0.05) + not benign + SIFT `deleterious` + PolyPhen `damaging` + on `--candidateGenesFile` panel |
+| D. Novel-variant path | HIGH/MODERATE IMPACT + `CLAIRSTO_VAF` **or** `DEEPSOMATIC_VAF` ≥ `params.snv_min_vaf` (default 0.05) + not benign + SIFT `deleterious` + PolyPhen `damaging` + on `--candidateGenesFile` panel |
 
 `ANN.gnomADg_AF < params.snv_gnomad_af_max` (default 0.01) applied to every clause — a common ClinVar-Pathogenic variant that is frequent in gnomAD is dropped as a soft PoN.
 
