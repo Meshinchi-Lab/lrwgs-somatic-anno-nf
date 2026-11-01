@@ -30,3 +30,11 @@ reports/
 prune*.sh
 prune_*.py
 retrieve*.py
+# Test fixtures must be committable even though *.txt is ignored above
+!tests/fixtures/genomic_viz/*.txt
+
+# nf-test working directory and log (nf-test.config: workDir = .nf-test)
+.nf-test/
+.nf-test.log
+# nf-test's temporary wrapper scripts in the repo root (left behind by an interrupted run)
+.nf-test-*.nf

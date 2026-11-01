@@ -3869,6 +3869,165 @@ cat("No Tier-1 SNVs with a resolvable gene SYMBOL for lollipop plots.\n")
 
 
 
+# Cohort figures {scrolling="true"}
+
+<!-- GENOMIC_VIZ outputs (circos + oncoprint). Staged under viz/ on PASS 2 of the
+     two-pass render by SV_REPORT_INDEX_COHORT and re-published next to index.html.
+     When no viz/ is staged (pass 1, run_genomic_viz=false, or no pass-1 SV table) every
+     card shows the pending note. Quarto dashboards give every cell its OWN card, so each
+     card here is exactly one cell returning one tag list (figure + caption + downloads),
+     and no cell returns a visible NULL (knitr would print "NULL" as a card). The two
+     cohort SVGs are embedded by embed-resources; the gallery thumbnails carry
+     data-external="1" so pandoc leaves them as links into viz/ and a large cohort does
+     not inflate index.html. -->
+
+```{r viz-load}
+#| include: false
+viz_dir     <- "viz"
+viz_exists  <- function(name) dir.exists(viz_dir) && file.exists(file.path(viz_dir, name))
+# File names need no URL encoding: COHORT_TO_CIRCOS sanitises sample names to [A-Za-z0-9._-].
+viz_href    <- function(name) file.path(viz_dir, name)
+# viz_note() takes raw HTML: htmlEscape anything read from a file before passing it in.
+viz_note    <- function(text) htmltools::HTML(paste0("<p style='color:#666; margin:10px 0;'>", text, "</p>"))
+viz_pending <- paste0("Cohort figures are produced by <code>GENOMIC_VIZ</code> between the two report ",
+                      "passes. None were staged for this render: it is pass 1, <code>run_genomic_viz</code> ",
+                      "is false, or pass 1 wrote no SV table.")
+viz_read    <- function(name) if (viz_exists(name)) readr::read_tsv(viz_href(name), show_col_types = FALSE) else NULL
+viz_counts     <- viz_read("counts.tsv")       # COHORT_TO_CIRCOS: one row per track set
+viz_maf_counts <- viz_read("maf.counts.tsv")   # COHORT_TO_MAF: metric / value
+viz_metric  <- function(m) {
+  if (is.null(viz_maf_counts)) return(NA_integer_)
+  v <- viz_maf_counts$value[viz_maf_counts$metric == m]
+  if (length(v) == 0) NA_integer_ else suppressWarnings(as.integer(v[1]))
+}
+viz_genes   <- if (viz_exists("oncoprint_genes.txt")) {
+  g <- trimws(readLines(viz_href("oncoprint_genes.txt"), warn = FALSE)); g[nzchar(g)]   # blank lines are not genes
+} else character()
+
+# A row of links to the files that exist. Names, when given, are the link text. Returns an
+# empty tag list (never NULL) when none exist.
+viz_downloads <- function(files, lead = "Files: ") {
+  if (is.null(names(files))) names(files) <- files
+  files <- files[vapply(files, viz_exists, logical(1))]
+  if (length(files) == 0) return(htmltools::tagList())
+  htmltools::tags$p(style = "font-size:0.85em; color:#666; margin:6px 0 0 0;", lead,
+    htmltools::tagList(lapply(seq_along(files), function(i) htmltools::tagList(
+      if (i > 1) " | ",
+      htmltools::tags$a(href = viz_href(files[[i]]), download = NA, names(files)[i])))))
+}
+# One card: the embedded SVG (height-capped so the caption stays visible in the card), the
+# caption, and the download row. The pending note when nothing was staged; a "not produced"
+# note when viz/ exists but this figure is missing.
+viz_figure_card <- function(stem, caption, files, max_height) {
+  if (!dir.exists(viz_dir)) return(viz_note(viz_pending))
+  if (!viz_exists(paste0(stem, ".svg")))
+    return(viz_note(paste0("<code>", stem, ".svg</code> was not produced in this run; see the GENOMIC_VIZ task log.")))
+  htmltools::tagList(
+    htmltools::tags$img(src = viz_href(paste0(stem, ".svg")), alt = stem,
+      style = sprintf("display:block; margin:0 auto; max-width:100%%; max-height:%dpx; width:auto; height:auto;", max_height)),
+    htmltools::tags$p(style = "font-size:0.9em; margin:8px 0 0 0;", htmltools::HTML(caption)),
+    viz_downloads(c(paste0(stem, ".png"), paste0(stem, ".svg"), files)))
+}
+```
+
+## Row {height="900px"}
+
+```{r viz-circos-cohort}
+#| title: "Cohort circos — SV links, copy-number ring, Tier-1 genes"
+cap <- paste0(
+  "Static circos (Circos 0.69). <b>Links</b>: pass-2 SVs, BND mates collapsed; insertions, ",
+  "SVs on contigs outside the 24 karyotype chromosomes and unparseable breakpoints are not drawn. ",
+  "Colour = driver tier (green T1, orange T2, grey T3); thickness = cohort recurrence <code>n_any</code> ",
+  "(2p one sample, 4p two, 6p three or four, 8p five or more; 3p when the SV is not in the cluster map ",
+  "or the cohort merge did not run). <b>Ring</b>: Wakhan copy-number segments (red gain, blue loss). ",
+  "<b>Labels</b>: Tier-1 genes: genes overlapping each SV breakpoint (else the first listed gene), the ",
+  "candidate genes of copy-number segments at the segment midpoint, and SNV genes at the variant; one ",
+  "label per gene per megabase.")
+# The counts sentence is optional: a counts.tsv missing any column or value (an older run, a
+# renamed COHORT_TO_CIRCOS column) drops the sentence instead of failing the whole render.
+need <- c("links", "tiles", "labels", "skipped_ins", "off_karyotype", "bad_breakpoint", "unknown_cna_type")
+if (!is.null(viz_counts) && all(c("set", need) %in% names(viz_counts))) {
+  cr <- viz_counts[viz_counts$set %in% "cohort", need]
+  v  <- if (nrow(cr) == 1) suppressWarnings(vapply(cr, function(x) as.integer(x[[1]]), integer(1))) else NA_integer_
+  if (!anyNA(v)) {
+    n_of <- function(k, one, many) sprintf("%d %s", v[[k]], if (v[[k]] == 1L) one else many)
+    cap <- paste0(cap, " This cohort: ", n_of("links", "link", "links"), ", ", n_of("tiles", "segment", "segments"),
+                  " and ", n_of("labels", "label", "labels"), " written (Circos drops labels that do not fit). ",
+                  "Not drawn: ", n_of("skipped_ins", "insertion", "insertions"), "; ",
+                  n_of("off_karyotype", "record", "records"), " off the karyotype and ",
+                  n_of("bad_breakpoint", "record", "records"), " with unparseable coordinates (SV, CNA and SNV together); ",
+                  n_of("unknown_cna_type", "copy-number segment", "copy-number segments"), " of unknown type.")
+  }
+}
+viz_figure_card("cohort.circos", cap, c("cohort.links.txt", "cohort.cna.txt", "cohort.labels.txt", "counts.tsv"), 580L)
+```
+
+## Row {height="820px"}
+
+```{r viz-oncoprint}
+#| title: "Oncoprint — gene × sample, SV + CNA + SNV"
+onco_files <- c("cohort.maf", "cohort.cn.tsv", "cohort.clinical.tsv", "oncoprint_genes.txt", "maf.counts.tsv",
+                "unmapped_consequences.tsv", "onco_matrix.txt", "cohort.oncoprint_summary.txt",
+                "cohort.oncoprint_geneSummary.txt", "cohort.oncoprint_sampleSummary.txt",
+                "cohort.oncoprint_clinicalData.txt", "cohort.oncoprint_maftools.maf")
+if (viz_exists("cohort.oncoprint.NO_DATA")) {
+  # The marker holds the reason (no oncoprint-eligible rows, or fewer than two genes).
+  reason <- trimws(paste(readLines(viz_href("cohort.oncoprint.NO_DATA"), warn = FALSE), collapse = " "))
+  htmltools::tagList(viz_note(paste0("No oncoprint was drawn: ", htmltools::htmlEscape(reason), ".")),
+                     viz_downloads(onco_files))
+} else {
+  elig <- viz_metric("oncoprint_genes_eligible"); capn <- viz_metric("oncoprint_genes_cap")
+  shown <- if (length(viz_genes)) {
+    if (!is.na(elig) && !is.na(capn)) sprintf(" %d of %d eligible genes shown (cap <code>oncoprint_top_genes</code> = %d).", length(viz_genes), elig, capn)
+    else sprintf(" %d genes shown.", length(viz_genes))
+  } else ""
+  m <- vapply(c("maf_rows_sv", "maf_rows_snv", "cn_rows"), viz_metric, integer(1))
+  rows <- if (!anyNA(m)) sprintf(" MAF: %d SV and %d SNV rows; %d copy-number calls.", m[[1]], m[[2]], m[[3]]) else ""
+  cap <- paste0(
+    "maftools <code>oncoplot</code>. <b>Rows</b>: candidate-panel genes with any non-synonymous SNV, SV or ",
+    "copy-number alteration, plus genes with such an alteration in &ge; 2 samples (without a panel: every such ",
+    "gene), ordered by the number of altered samples.", shown,
+    " <b>Cells</b>: the nine non-synonymous SNV classes from the VEP consequence (silent, intronic, UTR and ",
+    "splice-region rows stay in the MAF but are not drawn); <code>SV_BND</code>, <code>SV_DEL</code>, ",
+    "<code>SV_DUP</code>, <code>SV_INV</code>, <code>SV_INS</code>; copy number Amp/Del for panel genes; ",
+    "<code>Multi_Hit</code> when a gene carries more than one SNV/SV alteration in a sample; in the bar ",
+    "charts <code>Complex_Event</code> marks a gene with both a copy-number change and an SNV/SV alteration ",
+    "in one sample (its cell shows both). BND rows carry ",
+    "the breakend genes; other SV types carry panel genes only.", rows)
+  viz_figure_card("cohort.oncoprint", cap, onco_files, 520L)
+}
+```
+
+## Row {height="620px"}
+
+```{r viz-gallery}
+#| title: "Per-sample circos"
+pngs <- if (dir.exists(viz_dir)) {
+  # Natural order, so S2 sorts before S10.
+  stringr::str_sort(setdiff(list.files(viz_dir, pattern = "\\.circos\\.png$"), "cohort.circos.png"), numeric = TRUE)
+} else character()
+if (!dir.exists(viz_dir)) {
+  viz_note(viz_pending)
+} else if (length(pngs) == 0) {
+  viz_note("No per-sample circos figures: no sample appears in the pass-2 SV, CNA or SNV tables.")
+} else {
+  samples <- sub("\\.circos\\.png$", "", pngs)
+  # The dashboard's fill container makes this div a COLUMN flexbox; force a wrapping row so the
+  # tiles form a grid and each keeps its caption.
+  htmltools::tags$div(style = "display:flex; flex-direction:row; flex-wrap:wrap; gap:16px; justify-content:flex-start; align-items:flex-start; align-content:flex-start;",
+    lapply(seq_along(samples), function(i) {
+      s <- samples[i]
+      htmltools::tags$figure(style = "margin:0; flex:0 0 auto; width:210px; text-align:center;",
+        htmltools::tags$a(href = viz_href(pngs[i]), target = "_blank",
+          htmltools::tags$img(src = viz_href(pngs[i]), `data-external` = "1", loading = "lazy", alt = s,
+                              style = "width:200px; height:200px; object-fit:contain; border:1px solid #ddd;")),
+        htmltools::tags$figcaption(style = "font-size:0.85em; margin-top:4px;", htmltools::tags$strong(s),
+          viz_downloads(c(PNG = pngs[i], SVG = paste0(s, ".circos.svg"), links = paste0(s, ".links.txt"),
+                          CNA = paste0(s, ".cna.txt"), labels = paste0(s, ".labels.txt")), lead = "")))
+    }))
+}
+```
+
 # Information {scrolling="true"}
 
 <!-- Reference page: tier-scheme tables, column dictionaries, citations. On a

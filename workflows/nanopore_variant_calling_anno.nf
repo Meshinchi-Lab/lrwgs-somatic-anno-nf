@@ -18,6 +18,7 @@ include { ANNOTATIONS_SV     } from '../subworkflows/local/annotations_sv'
 include { SV_REPORT_INDEX    } from '../modules/local/sv_report_index/main'
 include { SV_REPORT_INDEX as SV_REPORT_INDEX_COHORT } from '../modules/local/sv_report_index/main'
 include { COHORT_MERGE_SV    } from '../subworkflows/local/cohort_merge_sv/main'
+include { GENOMIC_VIZ        } from '../subworkflows/local/genomic_viz/main'
 include { FILTER_SV          } from '../subworkflows/local/filter_sv/main'
 include { ANNOTATIONS_CNA   } from '../subworkflows/local/annotations_cna'
 include { FILTER_CNA        } from '../subworkflows/local/filter_cna/main'
@@ -338,18 +339,19 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     //
     //   pass 1  SV_REPORT_INDEX        → cohort_sv_pass2.tsv + "pending" cohort card
     //   then    COHORT_MERGE_SV        → cohort_sv_recurrent.tsv + merged VCF
+    //   then    GENOMIC_VIZ            → circos + oncoprint (viz/)
     //   pass 2  SV_REPORT_INDEX_COHORT → same report, cohort section populated
     //
     // The tiering code never moves between passes, so the tiers pass 2 renders
     // ARE the tiers the merge consumed — identical by construction, not by
     // assumption. Both passes publish to results/sv_report/; pass 2 necessarily
-    // finishes later (it depends on pass 1 through COHORT_MERGE_SV), so its
-    // index.html wins. With run_cohort_merge_sv=false there is no pass 2 and
+    // finishes later (it depends on pass 1 through COHORT_MERGE_SV and/or GENOMIC_VIZ), so its
+    // index.html wins. With both run_cohort_merge_sv and run_genomic_viz false there is no pass 2 and
     // pass 1's report — cohort card marked unavailable — is the published one.
     //
     // The inputs are bound to locals so both passes are fed the SAME channels;
-    // DSL2 forks a channel across multiple consumers (ch_candidate_genes_file
-    // already feeds three).
+    // DSL2 forks a channel across multiple consumers (ch_candidate_genes_file also
+    // feeds FILTER_SNV, IGV_REPORTS_SV and GENOMIC_VIZ).
     //
     def rpt_annotsv_tsv = ANNOTATIONS_SV.out.tsv.map { _meta, tsv -> tsv }.collect()
     def rpt_knot_html   = ANNOTATIONS_SV.out.html.map { _meta, html -> html }.collect()
@@ -373,6 +375,10 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     def rpt_dict_cna    = cna_dict_ch.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
     def rpt_dict_snv    = snv_dict_ch.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
 
+    def run_merge = params.run_cohort_merge_sv?.toString()?.toBoolean()
+    def run_viz   = params.run_genomic_viz?.toString()?.toBoolean()
+    def two_pass  = run_merge || run_viz
+
     SV_REPORT_INDEX(
         file("${projectDir}/bin/sv_report_index.qmd"),
         rpt_annotsv_tsv,
@@ -394,11 +400,12 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
         rpt_dict_snv,
         [],                     // cohort_recurrent_tsv — pass 1: merge has not run
         [],                     // cohort_merged_vcf    — pass 1: merge has not run
-        // Pass 1's report is overwritten by pass 2 whenever the cohort merge
-        // runs, so skip the per-sample DISCO rendering — the most expensive part
-        // of the render — and let pass 2 produce it. With the merge disabled
+        [],                     // viz_files            — pass 1: GENOMIC_VIZ has not run
+        // Pass 1's report is overwritten by pass 2 whenever a second pass runs (cohort
+        // merge and/or genomic figures), so skip the per-sample DISCO rendering — the most
+        // expensive part of the render — and let pass 2 produce it. With neither enabled
         // there is no pass 2, so pass 1 must render DISCO normally.
-        params.run_cohort_merge_sv?.toString()?.toBoolean() ? false : params.disco_enable
+        two_pass ? false : params.disco_enable
     )
 
     //
@@ -413,21 +420,58 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     // ANNOTATIONS_SV.out.vep_vcf is deliberately used instead of FILTER_SV's pass2 VCFs:
     // restricting pass2 to pass2 would make rescue impossible.
     //
-    if ( params.run_cohort_merge_sv?.toString()?.toBoolean() ) {
+    def ch_cohort_recurrent = channel.value( [] )
+    def ch_cohort_vcf       = channel.value( [] )
+    def ch_cluster_map      = channel.value( [] )
+    if ( run_merge ) {
         COHORT_MERGE_SV(
             SV_REPORT_INDEX.out.tsv_sv.map { tsv -> [ [ id: 'cohort' ], tsv ] },
             ANNOTATIONS_SV.out.vep_vcf.join( ANNOTATIONS_SV.out.vep_tbi, by: 0 ),
             fasta_ch2,
             fasta_fai.map { meta, _fa, fai -> [ meta, fai ] }
         )
+        // COHORT_MERGE_SV skips Jasmine below N=2, so each emit can be empty: ifEmpty([]) keeps
+        // pass 2 scheduled and the qmd renders its "unavailable" cards, instead of the whole
+        // render silently dropping out of the DAG.
+        ch_cohort_recurrent = COHORT_MERGE_SV.out.recurrent  .map { _meta, tsv -> tsv }.ifEmpty( [] )
+        ch_cohort_vcf       = COHORT_MERGE_SV.out.merged_vcf .map { _meta, vcf -> vcf }.ifEmpty( [] )
+        ch_cluster_map      = COHORT_MERGE_SV.out.cluster_map.map { _meta, tsv -> tsv }.ifEmpty( [] )
+    }
 
-        //
-        // Pass 2 — the SAME qmd, re-rendered with the cohort results staged.
-        // COHORT_MERGE_SV skips Jasmine entirely below N=2 (its N=1 guard), so
-        // both emits can legitimately be empty. .ifEmpty( [] ) keeps pass 2
-        // scheduled in that case and the qmd falls back to the "unavailable"
-        // card, instead of the whole render silently dropping out of the DAG.
-        //
+    //
+    // ── GENOMIC_VIZ — circos + oncoprint from the pass-1 cohort TSVs ────
+    // Same slot as COHORT_MERGE_SV (needs driver_tier). Link thickness uses the
+    // cluster map when the merge ran; without it every link is 3p. tsv_cna and tsv_snv
+    // are optional emits: .ifEmpty( [] ) hands the converters `[]` (table absent).
+    // GENOMIC_VIZ emits nothing when tsv_sv is empty, so viz_files gets the same
+    // .ifEmpty( [] ): pass 2 still renders; with no viz/ staged, the Cohort figures page
+    // shows its pending note.
+    //
+    def ch_viz_files = channel.value( [] )
+    if ( run_viz ) {
+        // Fail at launch, not after pass 1: COHORT_TO_MAF re-checks this, but only when its
+        // task is created, i.e. after the whole pass-1 render. Mirrors COHORT_MERGE_SV's checks.
+        if ( !(params.oncoprint_top_genes?.toString() ==~ /[1-9][0-9]*/) ) {
+            error "oncoprint_top_genes must be a positive integer, got '${params.oncoprint_top_genes}'. " +
+                  "Set --oncoprint_top_genes N, or --run_genomic_viz false."
+        }
+        GENOMIC_VIZ(
+            SV_REPORT_INDEX.out.tsv_sv .map { tsv -> [ [ id: 'cohort' ], tsv ] },
+            SV_REPORT_INDEX.out.tsv_cna.ifEmpty( [] ),
+            SV_REPORT_INDEX.out.tsv_snv.ifEmpty( [] ),
+            ch_cluster_map,
+            ch_candidate_genes_file,
+            channel.value( files("${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true) ),
+            channel.value( file("${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true) ),
+            channel.value( params.oncoprint_top_genes )
+        )
+        ch_viz_files = GENOMIC_VIZ.out.viz_files.ifEmpty( [] )
+    }
+
+    //
+    // Pass 2 — the SAME qmd, re-rendered with the cohort merge and/or the figures staged.
+    //
+    if ( two_pass ) {
         SV_REPORT_INDEX_COHORT(
             file("${projectDir}/bin/sv_report_index.qmd"),
             rpt_annotsv_tsv,
@@ -445,8 +489,9 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
             rpt_dict_sv,
             rpt_dict_cna,
             rpt_dict_snv,
-            COHORT_MERGE_SV.out.recurrent .map { _meta, tsv -> tsv }.ifEmpty( [] ),
-            COHORT_MERGE_SV.out.merged_vcf.map { _meta, vcf -> vcf }.ifEmpty( [] ),
+            ch_cohort_recurrent,
+            ch_cohort_vcf,
+            ch_viz_files,
             params.disco_enable     // pass 2 is the published report: render DISCO
         )
     }

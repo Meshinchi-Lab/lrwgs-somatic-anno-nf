@@ -4,7 +4,12 @@
 # ---------------
 # `bin/sv_report_index.qmd` previously installed DT, plotly, ensembldb and
 # plyranges at render time. That puts an outbound network dependency on the
-# critical path of every report, on a compute node. 
+# critical path of every report, on a compute node.
+#
+# 2026.11 adds the cohort-visualization layer: circlize (static circos / chord
+# diagrams, CRAN), ComplexHeatmap (oncoPrint, Bioconductor; depends on circlize)
+# and interacCircos (interactive htmlwidget circos, Bioconductor). Baked here
+# because runtime installs are refused by the qmd guard.
 #
 # BUILD
 # -----
@@ -18,9 +23,9 @@
 #     --build-arg IMAGE_REVISION="$(git rev-parse HEAD)" \
 #     --build-arg IMAGE_CREATED="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 #     --provenance=true --sbom=true \
-#     -t ghcr.io/meshinchi-lab/sv_report_index:2026.10 \
+#     -t ghcr.io/meshinchi-lab/sv_report_index:2026.11 \
 #     docker/sv_report_index
-#   docker push ghcr.io/meshinchi-lab/sv_report_index:2026.10
+#   docker push ghcr.io/meshinchi-lab/sv_report_index:2026.11
 #
 # The build context is this directory only. Its .dockerignore admits nothing
 # but the Dockerfile and install_pkgs.R (it applies only when this directory
@@ -35,7 +40,7 @@
 # Point the module at it (see modules/local/sv_report_index/main.nf), or
 # override per-run without editing code:
 #   nextflow run main.nf \
-#     --process.withName:SV_REPORT_INDEX.container 'ghcr.io/meshinchi-lab/sv_report_index:2026.10'
+#     --process.withName:SV_REPORT_INDEX.container 'ghcr.io/meshinchi-lab/sv_report_index:2026.11'
 #
 # NOTE ON BUILD TIME
 # ------------------
@@ -82,7 +87,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # resolver while resolving reliably via 1.1.1.1 / 8.8.8.8. So: retry, and fall
 # back to CRAN (verified reachable, HTTP 200) if P3M stays unresolvable.
 COPY install_pkgs.R /tmp/install_pkgs.R
-RUN Rscript /tmp/install_pkgs.R cran DT plotly \
+RUN Rscript /tmp/install_pkgs.R cran DT plotly circlize \
     && rm -rf /tmp/downloaded_packages
 
 # ---- Bioconductor layer ---------------------------------------------------
@@ -90,7 +95,7 @@ RUN Rscript /tmp/install_pkgs.R cran DT plotly \
 # Bioc version is pinned here — pinning it would risk a mismatch on a base
 # image bump. `ask=FALSE, update=FALSE` keeps the build non-interactive and
 # stops it from churning the base image's tidyverse.
-RUN Rscript /tmp/install_pkgs.R bioc ensembldb plyranges \
+RUN Rscript /tmp/install_pkgs.R bioc ensembldb plyranges ComplexHeatmap interacCircos \
     && rm -rf /tmp/downloaded_packages
 
 # ---- Verification ---------------------------------------------------------
@@ -99,7 +104,8 @@ RUN Rscript /tmp/install_pkgs.R bioc ensembldb plyranges \
 # fail the build here if any is missing.
 RUN Rscript -e ' \
       pkgs <- c("tidyverse","DT","plotly","jsonlite","htmltools", \
-                "ensembldb","plyranges","S4Vectors","GenomeInfoDb","BiocGenerics"); \
+                "ensembldb","plyranges","S4Vectors","GenomeInfoDb","BiocGenerics", \
+                "circlize","ComplexHeatmap","interacCircos"); \
       missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly=TRUE)]; \
       if (length(missing)) stop("MISSING: ", paste(missing, collapse=", ")); \
       cat("all", length(pkgs), "packages present\n"); \
@@ -111,7 +117,7 @@ RUN quarto --version
 
 
 ARG IMAGE_SOURCE=https://github.com/meshinchi-lab/lrwgs-somatic-anno-nf
-ARG IMAGE_VERSION=2026.10
+ARG IMAGE_VERSION=2026.11
 # Stamped at build time (see BUILD above); "unknown" marks an unstamped local build.
 ARG IMAGE_REVISION=unknown
 ARG IMAGE_CREATED=unknown
@@ -120,7 +126,7 @@ LABEL org.opencontainers.image.source="${IMAGE_SOURCE}" \
       org.opencontainers.image.url="${IMAGE_SOURCE}" \
       org.opencontainers.image.documentation="${IMAGE_SOURCE}/blob/main/docker/sv_report_index/Dockerfile" \
       org.opencontainers.image.title="sv_report_index" \
-      org.opencontainers.image.description="rocker/verse 4.6.1 + DT, plotly, ensembldb, plyranges for the SV_REPORT_INDEX Quarto report" \
+      org.opencontainers.image.description="rocker/verse 4.6.1 + DT, plotly, ensembldb, plyranges, circlize, ComplexHeatmap, interacCircos for the SV_REPORT_INDEX Quarto report" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
       org.opencontainers.image.revision="${IMAGE_REVISION}" \
       org.opencontainers.image.created="${IMAGE_CREATED}" \

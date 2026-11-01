@@ -1,0 +1,117 @@
+// subworkflows/local/genomic_viz/tests/main.nf.test
+nextflow_workflow {
+
+    name "Test Subworkflow GENOMIC_VIZ"
+    script "../main.nf"
+    workflow "GENOMIC_VIZ"
+    tag "subworkflows"
+    tag "genomic_viz"
+
+    test("fixture - cohort + 2 samples, oncoprint") {
+        when {
+            workflow {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = Channel.of([ [ id: 'cohort' ], file("\${fx}/cohort_sv_pass2.tsv", checkIfExists: true) ])
+                input[1] = Channel.value(file("\${fx}/cohort_cna_pass2.tsv", checkIfExists: true))
+                input[2] = Channel.value(file("\${fx}/cohort_snv.tsv", checkIfExists: true))
+                input[3] = Channel.value(file("\${fx}/cohort_sv_recurrent.map.tsv", checkIfExists: true))
+                input[4] = Channel.value(file("\${fx}/candidate_genes.txt", checkIfExists: true))
+                input[5] = Channel.value(files("\${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true))
+                input[6] = Channel.value(file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true))
+                input[7] = Channel.value(40)
+                """
+            }
+        }
+        then {
+            assert workflow.success
+            // One collected list; pass 2 stages it under viz/ by name, so names must be unique.
+            assert workflow.out.viz_files.size() == 1
+            def files = workflow.out.viz_files[0].collect { file(it).name }
+            assert files.size() == (files as Set).size()
+            assert (files as Set) == [
+                'cohort.circos.png',  'cohort.circos.svg',  'cohort.links.txt',  'cohort.cna.txt',  'cohort.labels.txt',
+                'colo829.circos.png', 'colo829.circos.svg', 'colo829.links.txt', 'colo829.cna.txt', 'colo829.labels.txt',
+                'coloSAV.circos.png', 'coloSAV.circos.svg', 'coloSAV.links.txt', 'coloSAV.cna.txt', 'coloSAV.labels.txt',
+                'counts.tsv',
+                'cohort.maf', 'cohort.cn.tsv', 'cohort.clinical.tsv', 'oncoprint_genes.txt',
+                'unmapped_consequences.tsv', 'maf.counts.tsv',
+                'cohort.oncoprint.png', 'cohort.oncoprint.svg', 'onco_matrix.txt',
+                'cohort.oncoprint_summary.txt', 'cohort.oncoprint_geneSummary.txt', 'cohort.oncoprint_sampleSummary.txt',
+                'cohort.oncoprint_clinicalData.txt', 'cohort.oncoprint_maftools.maf'
+            ] as Set
+            // The tile stack depth is the one rule this subworkflow owns: 6 for the cohort, 1 per sample.
+            assert workflow.out.circos_png.collectEntries { m, _p -> [ m.id, m.layers as Integer ] } ==
+                   [ cohort: 6, colo829: 1, coloSAV: 1 ]
+        }
+    }
+
+    test("header-only sv, no optional inputs - cohort set only, oncoprint NO_DATA") {
+        when {
+            workflow {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = Channel.of([ [ id: 'cohort' ], file("\${fx}/gv_header_only.sv.tsv", checkIfExists: true) ])
+                input[1] = Channel.value([])
+                input[2] = Channel.value([])
+                input[3] = Channel.value([])
+                input[4] = Channel.value([])
+                input[5] = Channel.value(files("\${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true))
+                input[6] = Channel.value(file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true))
+                input[7] = Channel.value(40)
+                """
+            }
+        }
+        then {
+            assert workflow.success
+            // With no samples the converter outputs are bare paths, not lists: the cohort set
+            // must still reach CIRCOS, and the NO_DATA marker must reach viz_files.
+            def files = workflow.out.viz_files[0].collect { file(it).name }
+            assert files.size() == 13
+            assert (files as Set) == [
+                'cohort.links.txt', 'cohort.cna.txt', 'cohort.labels.txt', 'counts.tsv',
+                'cohort.circos.png', 'cohort.circos.svg',
+                'cohort.maf', 'cohort.cn.tsv', 'cohort.clinical.tsv', 'oncoprint_genes.txt',
+                'unmapped_consequences.tsv', 'maf.counts.tsv',
+                'cohort.oncoprint.NO_DATA'
+            ] as Set
+            assert workflow.out.circos_png.collectEntries { m, _p -> [ m.id, m.layers as Integer ] } == [ cohort: 6 ]
+            assert workflow.out.oncoprint_png == []
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            workflow {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = Channel.of([ [ id: 'cohort' ], file("\${fx}/cohort_sv_pass2.tsv") ])
+                input[1] = Channel.value([])
+                input[2] = Channel.value([])
+                input[3] = Channel.value([])
+                input[4] = Channel.value([])
+                input[5] = Channel.value(files("\${projectDir}/assets/genomic_viz/circos/*.conf"))
+                input[6] = Channel.value(file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv"))
+                input[7] = Channel.value(40)
+                """
+            }
+        }
+        then {
+            assert workflow.success
+            def files = workflow.out.viz_files[0].collect { file(it).name }
+            assert files.size() == 25
+            assert (files as Set) == [
+                'cohort.links.txt', 'cohort.cna.txt', 'cohort.labels.txt',
+                'stub.links.txt', 'stub.cna.txt', 'stub.labels.txt', 'counts.tsv',
+                'cohort.circos.png', 'cohort.circos.svg', 'stub.circos.png', 'stub.circos.svg',
+                'cohort.maf', 'cohort.cn.tsv', 'cohort.clinical.tsv', 'oncoprint_genes.txt',
+                'unmapped_consequences.tsv', 'maf.counts.tsv',
+                'cohort.oncoprint.png', 'cohort.oncoprint.svg', 'onco_matrix.txt',
+                'cohort.oncoprint_summary.txt', 'cohort.oncoprint_geneSummary.txt', 'cohort.oncoprint_sampleSummary.txt',
+                'cohort.oncoprint_clinicalData.txt', 'cohort.oncoprint_maftools.maf'
+            ] as Set
+            assert workflow.out.circos_png.collectEntries { m, _p -> [ m.id, m.layers as Integer ] } == [ cohort: 6, stub: 1 ]
+        }
+    }
+}
