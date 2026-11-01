@@ -4,8 +4,8 @@ process SV_REPORT_INDEX {
 
     conda "${moduleDir}/environment.yml"
     container "${ workflow.containerEngine in ['singularity', 'apptainer'] && !task.ext.singularity_pull_docker_container ?
-        'docker://ghcr.io/meshinchi-lab/sv_report_index:2026.10' :
-        'ghcr.io/meshinchi-lab/sv_report_index:2026.10' }"
+        'docker://ghcr.io/meshinchi-lab/sv_report_index:2026.11' :
+        'ghcr.io/meshinchi-lab/sv_report_index:2026.11' }"
 
     input:
     // The report source itself, as a DECLARED input. It used to be `cp`'d from
@@ -36,10 +36,16 @@ process SV_REPORT_INDEX {
     // `driver_tier` is computed in the Quarto layer, so COHORT_MERGE_SV cannot
     // run until this process has emitted cohort_sv_pass2.tsv once. A single
     // render therefore cannot display its own cohort results. Pass 1 receives
-    // `[]` for both and renders a "pending" card; pass 2 receives the merge
-    // outputs and supersedes pass 1 in the publish dir.
+    // `[]` for both and renders a "pending" card. Pass 2 supersedes pass 1 in the
+    // publish dir; it receives the merge outputs when run_cohort_merge_sv is true,
+    // and `[]` when the merge is off (pass 2 then runs for the figures) or found nothing.
     path cohort_recurrent_tsv,  stageAs: 'cohort_merge/*'
     path cohort_merged_vcf,     stageAs: 'cohort_merge/*'
+    // GENOMIC_VIZ outputs: `[]` on pass 1, and on pass 2 when run_genomic_viz is false
+    // or GENOMIC_VIZ emitted nothing. Staged under viz/ so the qmd
+    // references images by relative path, and re-published (see outputs) so those
+    // paths resolve next to the published index.html.
+    path viz_files,             stageAs: 'viz/*'
     // DISCO on/off for THIS render, set at the call site rather than read from
     // params, because the two passes need different values and a withName
     // selector cannot express it. published report, rendered with DISCO off. `null` falls back to params.disco_enable.
@@ -71,6 +77,10 @@ process SV_REPORT_INDEX {
     path "data_dict_sv/*.data_dict.tsv",  optional: true, emit: data_dict_sv_out
     path "data_dict_cna/*.data_dict.tsv", optional: true, emit: data_dict_cna_out
     path "data_dict_snv/*.data_dict.tsv", optional: true, emit: data_dict_snv_out
+    // includeInputs: the viz/ files are staged INPUTS, and Nextflow leaves inputs out of
+    // output globs by default; without it nothing under viz/ is re-published and the
+    // report's relative <img>/<a> links break.
+    path "viz/*", optional: true, includeInputs: true, emit: viz_out
     tuple val("${task.process}"), val('quarto'),
           eval("quarto --version"),
           emit: versions_quarto, topic: versions

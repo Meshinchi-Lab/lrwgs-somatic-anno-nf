@@ -1,0 +1,197 @@
+// modules/local/cohort_to_maf/tests/main.nf.test
+nextflow_process {
+
+    name "Test Process COHORT_TO_MAF"
+    script "../main.nf"
+    process "COHORT_TO_MAF"
+    tag "modules"
+    tag "genomic_viz"
+    tag "cohort_to_maf"
+
+    test("fixture - maf, cn table, clinical, gene list capped at 5") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/cohort_sv_pass2.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/cohort_cna_pass2.tsv", checkIfExists: true)
+                input[2] = file("\${fx}/cohort_snv.tsv", checkIfExists: true)
+                input[3] = file("\${fx}/candidate_genes.txt", checkIfExists: true)
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 5
+                """
+            }
+        }
+        then {
+            assert process.success
+            def maf = file(process.out.maf[0][1]).readLines().findAll { !it.startsWith('#') }
+            assert maf[0] == 'Hugo_Symbol\tChromosome\tStart_Position\tEnd_Position\tReference_Allele\tTumor_Seq_Allele2\tVariant_Classification\tVariant_Type\tTumor_Sample_Barcode\tdriver_tier\tAlteration_Source'
+            def rows = maf.drop(1).collect { it.split('\t') }
+            assert rows.size() == 9
+            assert rows.count { it[6] == 'SV_BND' && it[7] == 'SV' } == 5
+            assert rows.find { it[0] == 'PCBP3' }[6..7] == ['SV_DEL', 'DEL']
+            assert rows.find { it[0] == 'PCBP3' }[1..3] == ['chr21', '45000000', '45015802']
+            // BND3978 is kept from its _2 mate: left gene at that locus, right gene AT THE PARTNER locus
+            assert rows.find { it[0] == 'AFF3' }[1..4] == ['chr2', '99727265', '99727265', 'T']
+            assert rows.find { it[0] == 'RUNX1' && it[8] == 'colo829' }[1..4] == ['chr21', '34816131', '34816131', 'N']
+            assert rows.find { it[0] == 'TLX3' }[1..4] == ['chr5', '171274715', '171274715', 'N']
+            assert rows.find { it[0] == 'TMPRSS15' }[6..7] == ['Nonsense_Mutation', 'SNP']
+            assert rows.find { it[0] == 'NOTCH1' }[6..7]   == ['Missense_Mutation', 'SNP']
+            // MAF indel convention: anchor base dropped, deletion starts one base after POS
+            assert rows.find { it[0] == 'LEF1' }[1..7] == ['chr1', '101', '101', 'T', '-', 'Frame_Shift_Del', 'DEL']
+            assert rows.every { it[1].startsWith('chr') }
+            assert !rows.any { it[0] == 'ETV6' }
+            // no two rows share (Chromosome, Start, Sample, Ref, Alt): maftools would merge them
+            def keys = rows.collect { [ it[1], it[2], it[8], it[4], it[5] ].join(':') }
+            assert keys.size() == keys.toSet().size()
+            def mc = file(process.out.counts[0][1]).readLines()
+            assert mc.contains('maf_rows_snv\t3') && mc.contains('maf_rows_sv\t6') && mc.contains('cn_conflicts\t0')
+            assert mc.contains('skipped_sv_duplicate_mates\t2') && mc.contains('skipped_cna_unknown_type\t1') && mc.contains('skipped_snv_no_symbol\t1')
+            assert mc.contains('class_SV_BND\t5') && mc.contains('class_Nonsense_Mutation\t1')
+            assert mc.contains('oncoprint_genes_eligible\t11') && mc.contains('oncoprint_genes_cap\t5')   // 11 qualify, 5 shown
+
+            def unmapped = file(process.out.unmapped[0][1]).readLines()
+            assert unmapped == ['vep_term\tn_rows', 'weird_term\t1']
+
+            def cn = file(process.out.cn_table[0][1]).readLines()
+            assert cn[0] == 'Gene\tSample_name\tCN'
+            assert cn.size() == 7
+            assert cn.contains('BACH1\tcoloSAV\tDel') && cn.contains('OLIG2\tcolo829\tAmp')
+
+            assert file(process.out.clinical[0][1]).readLines() == ['Tumor_Sample_Barcode\tsex\tetp', 'colo829\tF\tETP', 'coloSAV\tM\tnon-ETP']
+            assert file(process.out.genes[0][1]).readLines() == ['BACH1', 'RUNX1', 'SCAF4', 'AFF3', 'BCL11B']
+        }
+    }
+
+    test("no panel, no snv - bnd genes only, universe by frequency") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/cohort_sv_pass2.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/cohort_cna_pass2.tsv", checkIfExists: true)
+                input[2] = []
+                input[3] = []
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 40
+                """
+            }
+        }
+        then {
+            assert process.success
+            def rows = file(process.out.maf[0][1]).readLines().findAll { !it.startsWith('#') }.drop(1)
+            assert rows.size() == 6
+            assert rows.count { it.split('\t')[6] == 'SV_BND' } == 5 && rows.count { it.split('\t')[6] == 'SV_DEL' } == 1
+            assert file(process.out.cn_table[0][1]).readLines().size() == 7      // Candidate_genes already panel-intersected upstream
+            assert file(process.out.genes[0][1]).readLines()[0] == 'BACH1'       // 2 samples; then RUNX1, SCAF4 ...
+            assert file(process.out.genes[0][1]).readLines().size() == 9           // no panel: every altered gene, under the cap
+            def mc = file(process.out.counts[0][1]).readLines()
+            assert mc.contains('oncoprint_genes_eligible\t9') && mc.contains('oncoprint_genes_cap\t40')
+            assert file(process.out.clinical[0][1]).readLines().size() == 3
+        }
+    }
+
+    test("edge cases - tra, intragenic bnd, in-record dedupe, maf indels, in-frame, dnp, splice sub-terms, empty consequence, cn conflict, panel-first cap") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/c2m_edge.sv.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/c2m_edge.cna.tsv", checkIfExists: true)
+                input[2] = file("\${fx}/c2m_edge.snv.tsv", checkIfExists: true)
+                input[3] = file("\${fx}/c2m_edge.panel.txt", checkIfExists: true)
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 2
+                """
+            }
+        }
+        then {
+            assert process.success
+            def rows = file(process.out.maf[0][1]).readLines().findAll { !it.startsWith('#') }.drop(1).collect { it.split('\t') }
+            assert rows.size() == 14
+            assert rows.find { it[0] == 'GENEI' }[1..7] == ['chr7', '700', '701', '-', 'TT', 'Frame_Shift_Ins', 'INS']
+            assert rows.find { it[0] == 'GENES' }[1..7] == ['chr7', '990', '992', 'ATG', 'C', 'Frame_Shift_Del', 'DEL']   // no shared anchor: no start shift
+            assert rows.find { it[0] == 'GENEJ' }[4..7] == ['-', 'AAA', 'In_Frame_Ins', 'INS']
+            assert rows.find { it[0] == 'GENEK' && it[8] == 'S1' }[4..7] == ['AC', 'GT', 'Missense_Mutation', 'DNP']
+            assert rows.find { it[0] == 'GENEL' }[6] == 'Splice_Region'
+            assert rows.find { it[0] == 'GENEM' }[6] == 'Intron'
+            assert rows.find { it[0] == 'GENEA' }[1..4] == ['chr1', '1000', '1000', 'N']        // tra -> BND, left gene
+            assert rows.find { it[0] == 'GENEB' }[1..4] == ['chr2', '2000', '2000', 'N']        // right gene at the partner locus
+            assert rows.count { it[0] == 'GENEC' } == 1                                          // intragenic BND: one row
+            assert rows.count { it[0] == 'GENEX' } == 1 && rows.count { it[0] == 'GENEY' } == 1  // in-record dedupe
+            assert rows.find { it[0] == 'GENEX' }[6..7] == ['SV_DUP', 'SV']
+            assert rows.count { it[0] == 'GENEQ' } == 2
+            assert !rows.any { it[0] in ['GENEN', 'GENEO', 'GENEZ'] }
+            assert file(process.out.genes[0][1]).readLines() == ['GENEQ', 'GENEK']               // count desc, panel first, cap 2
+            assert file(process.out.cn_table[0][1]).readLines() == ['Gene\tSample_name\tCN', 'GENEP\tS1\tAmp', 'GENER\tS2\tAmp']
+            assert file(process.out.clinical[0][1]).readLines() == ['Tumor_Sample_Barcode\tsex\tetp']   // no sex/etp columns
+            assert file(process.out.unmapped[0][1]).readLines() == ['vep_term\tn_rows', '(empty)\t1']
+            def mc = file(process.out.counts[0][1]).readLines()
+            assert mc.contains('cn_conflicts\t1') && mc.contains('skipped_bad_coordinate\t2') && mc.contains('skipped_no_sample\t1')
+            assert mc.contains('skipped_sv_duplicate_mates\t1') && mc.contains('class_SV_DUP\t2') && mc.contains('class_Intron\t1')
+            assert mc.contains('oncoprint_genes_eligible\t3') && mc.contains('oncoprint_genes_cap\t2')
+        }
+    }
+
+    test("missing required column fails fast") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/c2c_bad.sv.tsv", checkIfExists: true) ]
+                input[1] = []
+                input[2] = []
+                input[3] = []
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 40
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).any { it.contains('lacks required column') && it.contains('breakpoint') }
+        }
+    }
+
+    test("top_genes must be a positive integer") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/cohort_sv_pass2.tsv", checkIfExists: true) ]
+                input[1] = []
+                input[2] = []
+                input[3] = []
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 0
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).any { it.contains('top_genes must be a positive integer') }
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/cohort_sv_pass2.tsv", checkIfExists: true) ]
+                input[1] = []
+                input[2] = []
+                input[3] = []
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 40
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.maf[0][1]).readLines().size() == 2        // #version + header
+            assert file(process.out.genes[0][1]).name == 'oncoprint_genes.txt'
+        }
+    }
+}

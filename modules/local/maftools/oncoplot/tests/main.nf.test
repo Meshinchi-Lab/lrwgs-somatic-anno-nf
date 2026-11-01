@@ -1,0 +1,262 @@
+// modules/local/maftools/oncoplot/tests/main.nf.test
+nextflow_process {
+
+    name "Test Process MAFTOOLS_ONCOPLOT"
+    script "../main.nf"
+    process "MAFTOOLS_ONCOPLOT"
+    tag "modules"
+    tag "genomic_viz"
+    tag "maftools/oncoplot"
+
+    test("mini maf - png, svg, matrix, summaries") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/mini.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'cohort.oncoprint.png'
+            assert file(process.out.png[0][1]).size() > 20000
+            assert file(process.out.svg[0][1]).text.contains('<svg')
+            def m = file(process.out.matrix[0][1]).readLines()
+            assert m[0] == 'colo829\tcoloSAV'
+            assert m.size() == 11                                  // header + 10 genes
+            assert m.find { it.startsWith('RUNX1\t') } == 'RUNX1\tSV_BND\tSV_BND'
+            assert m.find { it.startsWith('BACH1\t') } == 'BACH1\tAmp\tDel'
+            // AFF3 and TLX3 sit on multi-gene SV rows that share coordinates with another
+            // gene: both rows go blank if removeDuplicatedVariants is ever switched to TRUE.
+            assert m.find { it.startsWith('AFF3\t') } == 'AFF3\tSV_BND\t'
+            assert m.find { it.startsWith('TLX3\t') } == 'TLX3\t\tSV_BND'
+            assert process.out.summaries[0][1].collect { file(it).name } as Set ==
+                   ['cohort.oncoprint_summary.txt', 'cohort.oncoprint_geneSummary.txt', 'cohort.oncoprint_sampleSummary.txt',
+                    'cohort.oncoprint_clinicalData.txt', 'cohort.oncoprint_maftools.maf'] as Set
+            assert process.out.no_data == []
+            assert process.out.versions_maftools[0] == [ 'MAFTOOLS_ONCOPLOT', 'maftools', '2.26.0' ]
+        }
+    }
+
+    test("header-only maf - NO_DATA marker, no images") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/onco_empty.maf", checkIfExists: true),
+                             file("\${fx}/onco_empty.cn.tsv", checkIfExists: true),
+                             file("\${fx}/empty.txt", checkIfExists: true),
+                             file("\${fx}/onco_empty.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.png == []
+            assert process.out.svg == []
+            assert process.out.matrix == []
+            assert process.out.summaries == []
+            assert file(process.out.no_data[0][1]).name == 'cohort.oncoprint.NO_DATA'
+            assert file(process.out.no_data[0][1]).text.startsWith('no oncoprint-eligible MAF rows')
+            // The version epilogue still runs on the NO_DATA path (no early exit).
+            assert process.out.versions_maftools[0] == [ 'MAFTOOLS_ONCOPLOT', 'maftools', '2.26.0' ]
+        }
+    }
+
+    test("non-coding rows only - NO_DATA, not an R error") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/onco_noncoding.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/mini.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.png == []
+            assert process.out.matrix == []
+            assert file(process.out.no_data[0][1]).text.startsWith('no oncoprint-eligible MAF rows')
+        }
+    }
+
+    test("empty gene list - NO_DATA, no frequency fallback") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/empty.txt", checkIfExists: true),
+                             file("\${fx}/mini.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.png == []
+            assert process.out.matrix == []
+            assert file(process.out.no_data[0][1]).text.startsWith('no oncoprint-eligible genes')
+        }
+    }
+
+    test("one-gene list - NO_DATA, oncoplot needs two rows") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/one_gene.txt", checkIfExists: true),
+                             file("\${fx}/mini.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert process.out.png == []
+            assert file(process.out.no_data[0][1]).text.startsWith('only one oncoprint gene')
+        }
+    }
+
+    test("clinical absent ([]) - renders without annotation tracks") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             [] ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'cohort.oncoprint.png'
+            assert file(process.out.matrix[0][1]).readLines().size() == 11
+            assert process.out.no_data == []
+        }
+    }
+
+    test("header-only cn and clinical - renders, no copy-number cells") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/onco_empty.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/onco_empty.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def m = file(process.out.matrix[0][1]).readLines()
+            assert m.size() == 11
+            // BACH1 is altered only by copy number in mini.cn.tsv: with the header-only
+            // table it must be an empty row, proving the CN guard passed NULL to read.maf.
+            assert m.find { it.startsWith('BACH1\t') } == 'BACH1\t\t'
+            assert m.find { it.startsWith('RUNX1\t') } == 'RUNX1\tSV_BND\tSV_BND'
+        }
+    }
+
+    test("numerically coded clinical - stays categorical") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/mini.clinical_numeric.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'cohort.oncoprint.png'
+            assert file(process.out.matrix[0][1]).readLines().size() == 11
+        }
+    }
+
+    test("one-sample cohort with metadata - renders without clinical tracks") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/onco_single.maf", checkIfExists: true),
+                             file("\${fx}/onco_empty.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/onco_single.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def m = file(process.out.matrix[0][1]).readLines()
+            assert m[0] == 'colo829'
+            assert m.find { it.startsWith('RUNX1\t') } == 'RUNX1\tSV_BND'
+            assert m.find { it.startsWith('NOTCH1\t') } == 'NOTCH1\tMissense_Mutation'
+        }
+    }
+
+    test("seven clinical levels - fails naming the feature") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/onco_seven.maf", checkIfExists: true),
+                             file("\${fx}/onco_empty.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/onco_seven.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).any { it.contains('clinical feature sex has 7 levels') }
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ],
+                             file("\${fx}/mini.maf", checkIfExists: true),
+                             file("\${fx}/mini.cn.tsv", checkIfExists: true),
+                             file("\${fx}/mini.genes.txt", checkIfExists: true),
+                             file("\${fx}/mini.clinical.tsv", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'cohort.oncoprint.png'
+            assert file(process.out.svg[0][1]).name == 'cohort.oncoprint.svg'
+            assert file(process.out.matrix[0][1]).name == 'onco_matrix.txt'
+            assert process.out.summaries[0][1].size() == 5
+        }
+    }
+}

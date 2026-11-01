@@ -1,0 +1,107 @@
+// modules/local/circos/tests/main.nf.test
+nextflow_process {
+
+    name "Test Process CIRCOS"
+    script "../main.nf"
+    process "CIRCOS"
+    tag "modules"
+    tag "genomic_viz"
+    tag "circos"
+
+    test("three tracks - png and svg") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort', layers: 6 ],
+                             file("\${fx}/circos_three.links.txt", checkIfExists: true),
+                             file("\${fx}/circos_three.cna.txt", checkIfExists: true),
+                             file("\${fx}/circos_three.labels.txt", checkIfExists: true) ]
+                input[1] = files("\${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true)
+                """
+            }
+        }
+        then {
+            assert process.success
+            def png = process.out.png[0][1]
+            def svg = process.out.svg[0][1]
+            assert file(png).name == 'cohort.circos.png'
+            assert file(png).size() > 10000
+            // circos writes one <path> per link carrying its RGB colour: one tier1 link, one tier2 link
+            def svgText = file(svg).text
+            assert svgText.count('44,160,44') == 1
+            assert svgText.count('214,137,16') == 1
+            assert svgText.count('215,48,39') >= 1        // gain tile
+            assert svgText.count('69,117,180') >= 1       // loss tile
+            assert svgText.contains('BCL11B') && svgText.contains('TLX3')   // label text
+            assert process.out.versions_circos[0] == [ 'CIRCOS', 'circos', '0.69-8' ]
+        }
+    }
+
+    test("empty links and labels files render") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'sampleA', layers: 1 ],
+                             file("\${fx}/empty.txt", checkIfExists: true),
+                             file("\${fx}/circos_single.cna.txt", checkIfExists: true),
+                             file("\${fx}/empty.txt", checkIfExists: true) ]
+                input[1] = files("\${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true)
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'sampleA.circos.png'
+            def svgText = file(process.out.svg[0][1]).text
+            assert svgText.size() > 1000
+            assert svgText.count('44,160,44') == 0 && svgText.count('214,137,16') == 0   // no links drawn
+            assert svgText.count('215,48,39') == 1                                      // the one gain tile
+        }
+    }
+
+    test("all track files empty still renders the ideogram") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'sampleB' ],
+                             file("\${fx}/empty.txt", checkIfExists: true),
+                             file("\${fx}/empty.txt", checkIfExists: true),
+                             file("\${fx}/empty.txt", checkIfExists: true) ]
+                input[1] = files("\${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true)
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'sampleB.circos.png'
+            assert file(process.out.png[0][1]).size() > 10000
+            def svgText = file(process.out.svg[0][1]).text
+            assert svgText.count('44,160,44') == 0 && svgText.count('214,137,16') == 0
+            assert svgText.count('215,48,39') == 0 && svgText.count('69,117,180') == 0
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort', layers: 6 ],
+                             file("\${fx}/circos_three.links.txt", checkIfExists: true),
+                             file("\${fx}/circos_three.cna.txt", checkIfExists: true),
+                             file("\${fx}/circos_three.labels.txt", checkIfExists: true) ]
+                input[1] = files("\${projectDir}/assets/genomic_viz/circos/*.conf", checkIfExists: true)
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.png[0][1]).name == 'cohort.circos.png'
+            assert file(process.out.svg[0][1]).name == 'cohort.circos.svg'
+        }
+    }
+}
