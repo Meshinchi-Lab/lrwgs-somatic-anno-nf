@@ -175,9 +175,13 @@ Inputs gathered across all samples:
 
 The rendered `index.html` provides a cohort-level view of all per-sample KnotAnnotSV and VEP reports in one place, suitable for cohort-level SV review and filtering.
 
-The report is rendered **twice** when `run_cohort_merge_sv` is true. Pass 1 writes the tiered tables (`cohort_sv_pass2.tsv`, `cohort_cna_pass2.tsv`, `cohort_snv.tsv`); `COHORT_MERGE_SV` clusters the tiered SV loci across samples with Jasmine (see `cohort_merge_sv/` below); pass 2 re-renders the same report with the merge staged, so the Overview page gains a **Cohort recurrent SVs (Jasmine merge)** card and the tiered SV table (and the published `cohort_sv_pass2.tsv`) carry five recurrence columns joined by sample and record ID: `cohort_recurrent`, `n_any`, `n_tiered`, `cluster_span`, `cluster_id`. On pass 1 these columns are present but NA.
+The report is rendered **twice** when `run_cohort_merge_sv` or `run_genomic_viz` is true (both default true); with neither, pass 1 is the published report. Pass 1 writes the tiered tables (`cohort_sv_pass2.tsv`, `cohort_cna_pass2.tsv`, `cohort_snv.tsv`); `COHORT_MERGE_SV` clusters the tiered SV loci across samples with Jasmine (see `cohort_merge_sv/` below); pass 2 re-renders the same report with the merge staged, so the Overview page gains a **Cohort recurrent SVs (Jasmine merge)** card and the tiered SV table (and the published `cohort_sv_pass2.tsv`) carry five recurrence columns joined by sample and record ID: `cohort_recurrent`, `n_any`, `n_tiered`, `cluster_span`, `cluster_id`. On pass 1 these columns are present but NA.
 
 Output: `results/sv_report/index.html`
+
+### GENOMIC_VIZ — cohort circos and oncoprint (standard tools)
+
+Runs between the two report passes (`run_genomic_viz`, default true; it forces pass 2 even when the cohort merge is off). Two converters in the `csvtk` container reshape the pass-1 cohort TSVs — no Python or R — into **Circos** text tracks (`<set>.links.txt`, `<set>.cna.txt`, `<set>.labels.txt`) for the cohort and each sample, and into a **MAF** + copy-number table + gene list for **maftools**. `CIRCOS` (bioconda 0.69.9, karyotype shipped in the container, config in `assets/genomic_viz/circos/`) renders PNG + SVG per set; `MAFTOOLS_ONCOPLOT` (Bioconductor 2.26.0) renders the gene × sample oncoprint with SNV classes from VEP consequence (`assets/genomic_viz/vep_consequence_to_maf.tsv`), `SV_*` classes and Amp/Del. Encodings: link colour = `driver_tier`, thickness = cohort `n_any`, Tier-1 gene labels (SV breakpoint genes, copy-number candidate genes, SNV genes); oncoprint rows = candidate-panel genes with a non-synonymous SNV, SV or copy-number alteration plus genes with such an alteration in ≥ 2 samples, capped by `oncoprint_top_genes` (40; checked at launch). Pass 2 shows them on the **Cohort figures** page: the cohort circos and oncoprint embedded with captions that state the encodings and counts, a thumbnail gallery of the per-sample circos, and every intermediate downloadable. The same files are published under `genomic_viz/`. A MAF with no drawable rows, or fewer than two genes, gives an explained empty state instead of an oncoprint.
 
 ---
 
@@ -489,6 +493,8 @@ results/
 ├── cohort/                # per-sample ID-prefixed + region-restricted pre-filter VCFs and record tables (cohort merge inputs)
 ├── jasmine/               # raw Jasmine merged VCF
 ├── cohort_merge_sv/       # cohort_sv.regions.bed, cohort.sv.merged.vcf.gz, cohort_sv_recurrent.tsv (+ .map.tsv)
+├── genomic_viz/           # inputs/ (links, cna, labels, counts, cohort.maf, cohort.cn.tsv, oncoprint_genes.txt), circos/ (<set>.circos.png|svg), oncoplot/ (cohort.oncoprint.png|svg, onco_matrix.txt, summaries)
+├── sv_report/viz/         # the same files re-published beside index.html for the Cohort figures page
 ├── sv_report/             # cohort-level Quarto HTML report (index.html) + cohort_{sv,cna}_pass2.tsv, cohort_snv.tsv
 └── pipeline_info/         # execution timeline, report, trace, DAG
 ```

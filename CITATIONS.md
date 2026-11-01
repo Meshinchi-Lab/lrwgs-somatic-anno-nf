@@ -42,6 +42,18 @@
 
   > Pölönen, P., Di Giacomo, D., Seffernick, A.E. et al. The genomic basis of childhood T-lineage acute lymphoblastic leukaemia. Nature 632, 1082–1091 (2024). doi: 10.1038/s41586-024-07807-0.
 
+- [Circos](https://doi.org/10.1101/gr.092759.109) — static cohort and per-sample circos plots (GENOMIC_VIZ)
+
+  > Krzywinski M, Schein J, Birol I, Connors J, Gascoyne R, Horsman D, Jones SJ, Marra MA. Circos: an information aesthetic for comparative genomics. Genome Res. 2009 Sep;19(9):1639-45. doi: 10.1101/gr.092759.109. PubMed PMID: 19541911.
+
+- [maftools](https://doi.org/10.1101/gr.239244.118) — cohort oncoprint (GENOMIC_VIZ)
+
+  > Mayakonda A, Lin DC, Assenov Y, Plass C, Koeffler HP. Maftools: efficient and comprehensive analysis of somatic variants in cancer. Genome Res. 2018 Nov;28(11):1747-1756. doi: 10.1101/gr.239244.118. PubMed PMID: 30341162.
+
+- [csvtk](https://github.com/shenwei356/csvtk) — TSV reshaping in the GENOMIC_VIZ converters (no dedicated publication; cite the repository)
+
+  > Shen W. csvtk: a cross-platform, efficient and practical CSV/TSV toolkit. https://github.com/shenwei356/csvtk
+
 ## Software packaging/containerisation tools
 
 - [Anaconda](https://anaconda.com)
