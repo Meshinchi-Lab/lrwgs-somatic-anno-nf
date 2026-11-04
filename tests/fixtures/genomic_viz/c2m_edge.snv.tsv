@@ -1,0 +1,10 @@
+SAMPLE	CHROM	POS	REF	ALT	SYMBOL	Consequence	driver_tier
+S1	chr7	700	G	GTT	GENEI	frameshift_variant	2
+S1	chr7	800	C	CAAA	GENEJ	protein_altering_variant	2
+S1	chr7	900	AC	GT	GENEK	missense_variant	2
+S2	chr7	950	A	G	GENEL	splice_donor_5th_base_variant&intron_variant	2
+S2	chr7	960	A	G	GENEM	intron_variant	3
+S2	chr7	970	A	G	GENEN		2
+S2	chr7	NA	A	G	GENEO	missense_variant	2
+S2	chr7	980	A	G	GENEK	missense_variant	2
+S2	chr7	990	ATG	C	GENES	frameshift_variant	2

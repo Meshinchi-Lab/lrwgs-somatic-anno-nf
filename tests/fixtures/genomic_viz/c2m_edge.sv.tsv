@@ -1,0 +1,9 @@
+SAMPLE	ID	CHROM	POS	END	REF	ALT	SVTYPE	breakpoint	driver_tier	Candidate_genes	gene_name_left	gene_name_right	gene_source_left	gene_source_right
+S1	sv_tra_1	1	1000	1000	N	N[chr2:2000[	tra	chr1:1000|chr2:2000	1	NA	GENEA	GENEB	overlap	overlap
+S1	sv_tra_2	2	2000	2000	N	]chr1:1000]N	tra	chr2:2000|chr1:1000	1	NA	GENEB	GENEA	overlap	overlap
+S1	sv_intra_1	3	3000	3000	N	N[chr3:3500[	BND	chr3:3000|chr3:3500	2	NA	GENEC	GENEC	overlap	overlap
+S1	sv_dup	4	4000	5000	N	<DUP>	dup	chr4:4000-5000	2	GENEX; GENEY; GENEX	GENEX	GENEY	overlap	overlap
+	sv_nosample	5	100	200	N	<DEL>	DEL	chr5:100-200	3	GENEZ	GENEZ	GENEZ	overlap	overlap
+S2	sv_badpos	5	NA	200	N	<DEL>	DEL	chr5:NA-200	3	GENEZ	GENEZ	GENEZ	overlap	overlap
+S2	sv_del	6	6000	7000	N	<DEL>	DEL	chr6:6000-7000	3	GENEQ	GENEQ	GENEQ	overlap	overlap
+S1	sv_del2	6	6000	7000	N	<DEL>	DEL	chr6:6000-7000	3	GENEQ	GENEQ	GENEQ	overlap	overlap

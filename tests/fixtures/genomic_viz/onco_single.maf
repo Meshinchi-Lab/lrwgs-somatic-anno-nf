@@ -1,0 +1,4 @@
+#version 2.4
+Hugo_Symbol	Chromosome	Start_Position	End_Position	Reference_Allele	Tumor_Seq_Allele2	Variant_Classification	Variant_Type	Tumor_Sample_Barcode	driver_tier	Alteration_Source
+RUNX1	chr21	34816131	34816131	A	[chr2:99727265[N	SV_BND	SV	colo829	1	SV
+NOTCH1	chr9	136496196	136496196	C	T	Missense_Mutation	SNP	colo829	1	SNV

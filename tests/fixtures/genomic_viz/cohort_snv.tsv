@@ -1,0 +1,6 @@
+SAMPLE	CHROM	POS	REF	ALT	SYMBOL	Consequence	driver_tier
+colo829	chr21	18275274	G	A	TMPRSS15	stop_gained	2
+colo829	chr21	6116503	C	T	NA	intergenic_variant	3
+coloSAV	chr9	136496196	C	T	NOTCH1	missense_variant&splice_region_variant	1
+coloSAV	chr1	100	AT	A	LEF1	frameshift_variant	2
+coloSAV	chr1	200	G	GTT	ETV6	weird_term	2

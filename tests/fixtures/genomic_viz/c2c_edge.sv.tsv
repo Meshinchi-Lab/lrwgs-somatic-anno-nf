@@ -1,0 +1,3 @@
+SAMPLE	ID	CHROM	POS	END	SVTYPE	breakpoint	driver_tier	Gene_name_display	gene_name_left	gene_name_right	gene_source_left	gene_source_right
+P 1/a	severus_BND_7_1	1	1000000	1000000	BND	chr1:1000000|chr2:2000000	1	GENEA; GENEB	GENEA	GENEB	nearest	nearest
+P 1/a	severus_DEL_8	3	100	NA	DEL	chr3:100-NA	2	GENEC	GENEC	GENEC	overlap	overlap

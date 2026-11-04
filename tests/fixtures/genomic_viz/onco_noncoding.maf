@@ -1,0 +1,4 @@
+#version 2.4
+Hugo_Symbol	Chromosome	Start_Position	End_Position	Reference_Allele	Tumor_Seq_Allele2	Variant_Classification	Variant_Type	Tumor_Sample_Barcode	driver_tier	Alteration_Source
+NOTCH1	chr9	136496196	136496196	C	T	Silent	SNP	colo829	NA	SNV
+LEF1	chr1	100	100	G	A	Intron	SNP	coloSAV	NA	SNV

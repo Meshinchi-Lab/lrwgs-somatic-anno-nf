@@ -1,0 +1,10 @@
+#version 2.4
+Hugo_Symbol	Chromosome	Start_Position	End_Position	Reference_Allele	Tumor_Seq_Allele2	Variant_Classification	Variant_Type	Tumor_Sample_Barcode	driver_tier	Alteration_Source
+BCL11B	chr14	99232731	99232731	G	N[chr5:171319244[	SV_BND	SV	colo829	1	SV
+RUNX1	chr21	34816131	34816131	A	[chr2:99727265[N	SV_BND	SV	colo829	1	SV
+AFF3	chr21	34816131	34816131	A	[chr2:99727265[N	SV_BND	SV	colo829	1	SV
+RUNX1	chr21	34797509	34797509	N	N[chr5:171274715[	SV_BND	SV	coloSAV	1	SV
+TLX3	chr21	34797509	34797509	N	N[chr5:171274715[	SV_BND	SV	coloSAV	1	SV
+TMPRSS15	chr21	18275274	18275274	G	A	Nonsense_Mutation	SNP	colo829	2	SNV
+NOTCH1	chr9	136496196	136496196	C	T	Missense_Mutation	SNP	coloSAV	1	SNV
+LEF1	chr1	100	101	AT	A	Frame_Shift_Del	DEL	coloSAV	2	SNV
