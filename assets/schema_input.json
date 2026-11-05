@@ -32,7 +32,7 @@
                 "format": "file-path",
                 "exists": true,
                 "pattern": "^\\S+\\.vcf(\\.gz)?$",
-                "errorMessage": "SAVANA SV VCF must have extension '.vcf' or '.vcf.gz'. This column is OPTIONAL: leave the value empty, write NA (any case), or omit the column entirely to run the SAVANA process instead of supplying a pre-computed VCF."
+                "errorMessage": "SAVANA SV VCF must have extension '.vcf' or '.vcf.gz'. This column is OPTIONAL: leave the value empty, write NA (any case), or omit the column entirely to run the SAVANA process instead of supplying a pre-computed VCF. A pre-computed VCF must be the raw SAVANA somatic output, <sample>.classified.somatic.vcf; the pipeline sorts and deduplicates it (DEDUPLICATE_SAVANA), so it need not be deduplicated first."
             },
             "wahkan_cnv": {
                 "type": "string",

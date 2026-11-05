@@ -261,6 +261,8 @@ id,bam,severus_sv,savana_sv,wahkan_cnv,clairsto_snv,deepsomatic_snv
 SAMPLE_1,/path/to/SAMPLE_1.haplotagged.bam,/path/to/SAMPLE_1.severus_somatic.vcf.gz,,/path/to/SAMPLE_1.wakhan_cna.vcf.gz,/path/to/SAMPLE_1.wf-somatic-snv.vcf.gz,/path/to/SAMPLE_1.deepsomatic.vcf.gz
 ```
 
+`savana_sv` is optional. Leave it empty (as above), write `NA`, or omit the column to have the pipeline run SAVANA. To supply a precomputed call set instead, give the raw SAVANA somatic output, `<sample>.classified.somatic.vcf` (as written by `savana to`)
+
 ### Minimal run
 
 ```bash
