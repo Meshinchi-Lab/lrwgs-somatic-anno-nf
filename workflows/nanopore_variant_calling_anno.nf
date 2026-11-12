@@ -20,6 +20,7 @@ include { SV_REPORT_INDEX as SV_REPORT_INDEX_COHORT } from '../modules/local/sv_
 include { COHORT_MERGE_SV    } from '../subworkflows/local/cohort_merge_sv/main'
 include { GENOMIC_VIZ        } from '../subworkflows/local/genomic_viz/main'
 include { FILTER_SV          } from '../subworkflows/local/filter_sv/main'
+include { ST17_SVINFT        } from '../modules/local/st17_svinft/main'
 include { ANNOTATIONS_CNA   } from '../subworkflows/local/annotations_cna'
 include { FILTER_CNA        } from '../subworkflows/local/filter_cna/main'
 include { IGV_REPORTS_SV     } from '../subworkflows/local/igv_reports/main'
@@ -330,6 +331,35 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     )
 
     //
+    // ── ST17_SVINFT — same-type ST17 DEL/DUP matches on the pass-2 tables ──
+    // AnnotSV attaches an ST17 DEL/DUP entry only when it lies inside the called SV
+    // (FtIncludedInSV), so a precise call slightly inside its published counterpart is
+    // missed. ST17_SVINFT adds same-type entries the SV covers by at least
+    // svinft_min_ref_coverage of their length; the report merges both before its ST17
+    // cleaning step. Skipped, with a warning, when either BED or ensembl_db is unset or not
+    // found: the report then uses AnnotSV's matches alone.
+    //
+    def svinft_inputs   = [ svinft_del_bed: params.svinft_del_bed, svinft_dup_bed: params.svinft_dup_bed, ensembl_db: params.ensembl_db ]
+    def svinft_missing  = svinft_inputs.findAll { _name, p -> !p || !file(p.toString()).exists() }.keySet()
+    def ch_sv_pass2_rpt = FILTER_SV.out.tsv_pass2
+    if ( svinft_missing ) {
+        log.warn "ST17_SVINFT skipped: ${svinft_missing.join(', ')} unset or not found; the SV report uses AnnotSV's ST17 DEL/DUP matches only."
+    } else {
+        // Fail at launch, not after FILTER_SV: the R script re-checks this.
+        if ( !(params.svinft_min_ref_coverage?.toString() ==~ /(0?\.[0-9]*[1-9][0-9]*|1(\.0*)?)/) ) {
+            error "svinft_min_ref_coverage must be a number in (0, 1], got '${params.svinft_min_ref_coverage}'."
+        }
+        ST17_SVINFT(
+            FILTER_SV.out.tsv_pass2,
+            file(params.svinft_del_bed),
+            file(params.svinft_dup_bed),
+            file(params.ensembl_db),
+            params.svinft_min_ref_coverage
+        )
+        ch_sv_pass2_rpt = ST17_SVINFT.out.tsv
+    }
+
+    //
     // ── SV_REPORT_INDEX — TWO-PASS RENDER ───────────────────────────────
     // driver_tier exists only in the Quarto layer, so COHORT_MERGE_SV consumes
     // this process's output while its own results belong in the same report — a
@@ -358,7 +388,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     def rpt_knot_xl     = ANNOTATIONS_SV.out.xl.map { _meta, xlsm -> xlsm }.collect().ifEmpty( [] )
     def rpt_vep_html    = ANNOTATIONS_SV.out.vep_report.map { _meta, html -> html }.collect().ifEmpty( [] )
     def rpt_igv_html    = IGV_REPORTS_SV.out.report.map { _meta, html -> html }.collect().ifEmpty( [] )
-    def rpt_sv_pass2    = FILTER_SV.out.tsv_pass2.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
+    def rpt_sv_pass2    = ch_sv_pass2_rpt.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
     def rpt_cna_pass2   = cna_tsv_pass2_ch.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
     def rpt_snv_tsv     = snv_tsv_ch.map { _meta, tsv -> tsv }.collect().ifEmpty( [] )
     def rpt_metadata    = params.sample_metadata ? file(params.sample_metadata, checkIfExists: true) : []

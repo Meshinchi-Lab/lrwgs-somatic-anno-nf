@@ -1,0 +1,118 @@
+// modules/local/st17_svinft/tests/main.nf.test
+nextflow_process {
+
+    name "Test Process ST17_SVINFT"
+    script "../main.nf"
+    process "ST17_SVINFT"
+    tag "modules"
+    tag "st17_svinft"
+
+    test("coverage 0.5 - partial, containing and contained matches; Mb-scale and low-coverage entries rejected") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
+                input[4] = 0.5
+                """
+            }
+        }
+        then {
+            assert process.success
+            def out = file(process.out.tsv[0][1])
+            assert out.name == 'S1.st17_svinft.filtered.pass2.tsv'   // new name; matches the report's glob
+            def inLines  = file("${projectDir}/tests/fixtures/st17_svinft/pass2.tsv").readLines()
+            assert inLines.size() == 8 && !inLines[0].contains('SVinFt')   // the input fixture is untouched
+            def outLines = out.readLines()
+            assert outLines.size() == inLines.size()
+            assert outLines[0] == inLines[0] + '\tST17_DEL_SVinFt\tST17_DUP_SVinFt'
+            // every original column is written back unchanged, quotes included
+            outLines.drop(1).eachWithIndex { line, i ->
+                def f = line.split('\t', -1)
+                assert f[0..-3].join('\t') == inLines[i + 1]
+            }
+            def cells = outLines.drop(1).collectEntries { line ->
+                def f = line.split('\t', -1)
+                [ (f[3]): [ del: f[-2], dup: f[-1] ] ]
+            }
+            // DUP inside two BCL11B-enhancer entries (81% and 84% covered); the 59.7 Mb entry is rejected
+            assert cells.sv_dup_inside.dup == 'chr14:98541878-chr14:98544474_(BCL11B_enh) [30]|chr14:98541905-chr14:98544383_(BCL11B_enh) [30]'
+            assert cells.sv_dup_inside.del == ''             // a DEL-type entry never matches a DUP
+            // ";" -> "|" and " " -> "_", as AnnotSV encodes names; 62.5% covered
+            assert cells.sv_del_partial.del == 'chr9:21910001-chr9:21990000_(CDKN2A|_CDKN2B) [877]'
+            assert cells.sv_del_low.del == ''                // 25% covered
+            assert cells.sv_del_contains.del == 'chr5:1050001-chr5:1060000_(TERT) [7]'   // entry inside the SV
+            assert cells.sv_bnd == [ del: '', dup: '' ]
+            assert cells.sv_dup_noend == [ del: '', dup: '' ]
+            assert cells.sv_del_contig == [ del: '', dup: '' ]   // contig outside 1-22/X/Y
+            assert process.out.versions_plyranges[0][1] == 'plyranges'
+        }
+    }
+
+    test("coverage 0.9 - only the fully covered entry survives") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
+                input[4] = 0.9
+                """
+            }
+        }
+        then {
+            assert process.success
+            def matched = file(process.out.tsv[0][1]).readLines().drop(1)
+                .collect { it.split('\t', -1) }
+                .findAll { f -> f[-2] || f[-1] }
+                .collect { f -> f[3] }
+            assert matched == [ 'sv_del_contains' ]
+        }
+    }
+
+    test("coverage outside (0, 1] - fails naming the value") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
+                input[4] = 0
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).any { it.contains("min_ref_coverage must be a number in (0, 1], got '0'") }
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
+                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
+                input[4] = 0.5
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = file(process.out.tsv[0][1]).readLines()
+            assert lines[0].endsWith('\tST17_DEL_SVinFt\tST17_DUP_SVinFt')
+            assert lines.size() == 8
+        }
+    }
+}

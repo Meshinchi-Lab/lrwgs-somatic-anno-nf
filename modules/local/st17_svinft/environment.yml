@@ -1,0 +1,14 @@
+---
+# yaml-language-server: $schema=https://raw.githubusercontent.com/nf-core/modules/master/modules/environment-schema.json
+# Conda route for ST17_SVINFT. The tested route is the container
+# ghcr.io/meshinchi-lab/sv_report_index:2026.11 (R 4.6, plyranges 1.32, GenomicRanges 1.64,
+# RSQLite 3.53), shared with SV_REPORT_INDEX.
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - conda-forge::r-base>=4.4
+  - conda-forge::r-dbi
+  - conda-forge::r-rsqlite
+  - bioconda::bioconductor-genomicranges
+  - bioconda::bioconductor-plyranges
