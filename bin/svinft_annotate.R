@@ -1,34 +1,35 @@
 #!/usr/bin/env Rscript
 #
-# st17_svinft.R -- same-type ST17 DEL/DUP matches for pass-2 SV records, in the
+# svinft_annotate.R -- same-type reference DEL/DUP matches for pass-2 SV records, in the
 # AnnotSV "SVincludedInFt" style but with a coverage floor.
 #
-# Why: AnnotSV receives the ST17 DEL/DUP BEDs as FtIncludedInSV, so a reference entry
-# is attached only when it lies ENTIRELY INSIDE the called SV. A precise long-read
-# call that sits slightly inside its published counterpart is therefore missed: for
-# example the BCL11B-enhancer tandem duplication called as 3H_PBM68877
-# severus_DUP2115 (chr14:98,542,293-98,544,400) against ST17 entries at
-# 98,541,878-98,544,474. Annotating the other way round (SV inside the reference)
-# alone would over-call, because many ST17 entries span megabases; the coverage floor
-# keeps an entry only when the SV covers at least `min_ref_coverage` of its length.
+# Why: a reference SV BED given to AnnotSV as FtIncludedInSV attaches an entry only when it
+# lies ENTIRELY INSIDE the called SV. A precise long-read call that sits slightly inside its
+# published counterpart is therefore missed: for example a 2.1 kb BCL11B-enhancer tandem
+# duplication called at chr14:98,542,293-98,544,400 against reference entries for the same
+# event at 98,541,878-98,544,474. Annotating the other way round (SV inside the reference)
+# alone would over-call, because reference sets can hold megabase-scale entries; the
+# coverage floor keeps an entry only when the SV covers at least `min_ref_coverage` of its
+# length.
 #
-# Rule, per DEL or DUP record: attach every ST17 entry of the SAME type whose overlap
+# Rule, per DEL or DUP record: attach every reference entry of the SAME type whose overlap
 # with the SV covers >= min_ref_coverage of the entry's length. This includes entries
-# inside the SV (coverage 1, already reported by AnnotSV; the report merge de-duplicates)
-# and entries that contain or partly overlap the SV.
+# inside the SV (coverage 1, also reported by AnnotSV when the same BED is given as
+# FtIncludedInSV; the report merge de-duplicates) and entries that contain or partly
+# overlap the SV.
 #
 # Output: the input pass-2 table with every original column written back byte for byte,
 # plus two columns:
-#   ST17_DEL_SVinFt, ST17_DUP_SVinFt   "name [score]" entries joined by "|", ordered by
-#                                      score (desc) then name; empty when nothing matches
-#                                      or the record is not of that type.
-# Names are encoded as AnnotSV writes them into the pass-2 table (";" -> "|", " " -> "_"),
-# so the report can merge them with AnnotSV's name_ST17_DEL / name_ST17_DUP cells.
+#   SVinFt_DEL, SVinFt_DUP   "name [score]" entries joined by "|", ordered by score (desc)
+#                            then name; empty when nothing matches or the record is not of
+#                            that type.
+# Names are encoded as AnnotSV writes user-BED names into the pass-2 table (";" -> "|",
+# " " -> "_"), so the report can merge them with AnnotSV's cells for the same BED.
 #
 # The EnsDb supplies the chromosome names and lengths (Ensembl style: 1..22, X, Y):
 # records or entries on other contigs, or past a chromosome end, are not matched.
 #
-# Usage: st17_svinft.R <in.tsv> <out.tsv> <st17_del.bed> <st17_dup.bed> <ensdb.sqlite> <min_ref_coverage>
+# Usage: svinft_annotate.R <in.tsv> <out.tsv> <ref_del.bed> <ref_dup.bed> <ensdb.sqlite> <min_ref_coverage>
 
 suppressPackageStartupMessages({
   library(GenomicRanges)
@@ -37,7 +38,7 @@ suppressPackageStartupMessages({
 
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) != 6) {
-  stop("usage: st17_svinft.R <in.tsv> <out.tsv> <st17_del.bed> <st17_dup.bed> <ensdb.sqlite> <min_ref_coverage>")
+  stop("usage: svinft_annotate.R <in.tsv> <out.tsv> <ref_del.bed> <ref_dup.bed> <ensdb.sqlite> <min_ref_coverage>")
 }
 in_tsv   <- args[1]
 out_tsv  <- args[2]
@@ -91,7 +92,7 @@ sv$len_ok <- sv$seqnames %in% names(chr_len) & !is.na(sv$start) & !is.na(sv$end)
              sv$start >= 1 & sv$end >= sv$start
 sv$len_ok[sv$len_ok] <- sv$end[sv$len_ok] <= chr_len[sv$seqnames[sv$len_ok]]
 
-# ---- ST17 reference entries ----------------------------------------------------------
+# ---- reference entries --------------------------------------------------------------
 read_ref <- function(path) {
   x <- readLines(path, warn = FALSE)
   x <- x[nzchar(x) & !startsWith(x, "#")]
@@ -134,16 +135,16 @@ for (t in c("DEL", "DUP")) {
       }
     }
   }
-  message(sprintf("st17_svinft: %s: %d records, %d ST17 entries, %d records matched (coverage >= %g)",
+  message(sprintf("svinft_annotate: %s: %d records, %d reference entries, %d records matched (coverage >= %g)",
                   t, nrow(q), nrow(ref), n_hit, min_cov))
   out_cols[[t]] <- cell
 }
 n_skip <- sum(sv$svtype %in% c("DEL", "DUP") & !sv$len_ok)
 if (n_skip > 0) {
-  message(sprintf("st17_svinft: %d DEL/DUP records not matched (contig outside 1-22/X/Y, unparseable or out-of-range coordinates)", n_skip))
+  message(sprintf("svinft_annotate: %d DEL/DUP records not matched (contig outside 1-22/X/Y, unparseable or out-of-range coordinates)", n_skip))
 }
 
 # ---- write: original lines unchanged, two columns appended ----------------------------
-out <- c(paste(lines[1], "ST17_DEL_SVinFt", "ST17_DUP_SVinFt", sep = "\t"),
+out <- c(paste(lines[1], "SVinFt_DEL", "SVinFt_DUP", sep = "\t"),
          if (length(body) > 0) paste(body, out_cols$DEL, out_cols$DUP, sep = "\t") else character(0))
 writeLines(out, out_tsv)

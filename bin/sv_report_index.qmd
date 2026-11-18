@@ -1491,12 +1491,13 @@ if (!is.null(jm_recur) && all(.need %in% names(jm_recur))) {
 }
 ```
 
-```{r st17-svinft-merge}
+```{r svinft-merge}
 #| eval: !expr nrow(pass2_long) > 0
-# Merge ST17_SVINFT's same-type ST17 DEL/DUP matches (modules/local/st17_svinft) into
-# AnnotSV's name_ST17_DEL/DUP and score_ST17_DEL/DUP BEFORE the cleaning chunk below, so
+# Merge SVINFT_ANNOTATE's same-type reference DEL/DUP matches (modules/local/svinft_annotate)
+# into AnnotSV's name_ST17_DEL/DUP and score_ST17_DEL/DUP BEFORE the cleaning chunk below, so
 # the SVTYPE blanking, the BND 10 kb partner filter, the ST17_hit summary and the driver
-# tier all see one set of matches.
+# tier all see one set of matches. This report assumes the module's reference BEDs
+# (svinft_del_bed/svinft_dup_bed) are the ST17 DEL/DUP sets that AnnotSV also receives.
 #
 # AnnotSV attaches an FtIncludedInSV entry only when it lies inside the called SV; the
 # module adds entries the SV covers by >= svinft_min_ref_coverage of their length. AnnotSV
@@ -1504,8 +1505,8 @@ if (!is.null(jm_recur) && all(.need %in% names(jm_recur))) {
 # not aligned 1:1; parse_st17_pair() pairs them exactly as the tier step does. The module's
 # cells hold exact "name [score]" pairs. Union by name (the module's score wins on a
 # duplicate), written back as aligned "|" lists; the module's two columns are then dropped.
-# When ST17_SVINFT did not run (an input was missing), the columns are absent: no-op.
-svinft_cols <- c(DEL = "ST17_DEL_SVinFt", DUP = "ST17_DUP_SVinFt")
+# When SVINFT_ANNOTATE did not run (an input was missing), the columns are absent: no-op.
+svinft_cols <- c(DEL = "SVinFt_DEL", DUP = "SVinFt_DUP")
 if (all(svinft_cols %in% names(pass2_long))) {
   parse_svinft_cell <- function(cell) {
     if (is.na(cell) || !nzchar(cell)) return(list(names = character(0), scores = character(0)))
@@ -1513,7 +1514,7 @@ if (all(svinft_cols %in% names(pass2_long))) {
     m <- m[!is.na(m[, 1]), , drop = FALSE]
     list(names = m[, 2], scores = m[, 3])
   }
-  merge_st17_cells <- function(ann_name, ann_score, svinft_cell) {
+  merge_svinft_cells <- function(ann_name, ann_score, svinft_cell) {
     add <- parse_svinft_cell(svinft_cell)
     if (length(add$names) == 0) return(c(ann_name, ann_score))
     ann <- parse_st17_pair(clean_annot_padding(ann_name), clean_annot_padding(ann_score),
@@ -1528,10 +1529,10 @@ if (all(svinft_cols %in% names(pass2_long))) {
     nm <- paste0("name_ST17_", t); sc <- paste0("score_ST17_", t)
     for (col in c(nm, sc)) if (!col %in% names(pass2_long)) pass2_long[[col]] <- NA_character_
     merged <- purrr::pmap(list(pass2_long[[nm]], pass2_long[[sc]], pass2_long[[svinft_cols[[t]]]]),
-                          merge_st17_cells)
+                          merge_svinft_cells)
     pass2_long[[nm]] <- vapply(merged, `[`, character(1), 1)
     pass2_long[[sc]] <- vapply(merged, `[`, character(1), 2)
-    message(sprintf("st17-svinft-merge: %d %s records carry ST17_SVINFT matches",
+    message(sprintf("svinft-merge: %d %s records carry SVINFT_ANNOTATE matches",
                     sum(!is.na(pass2_long[[svinft_cols[[t]]]]) & nzchar(pass2_long[[svinft_cols[[t]]]])), t))
   }
   pass2_long <- pass2_long |> select(-all_of(unname(svinft_cols)))
