@@ -11,7 +11,7 @@ There is no ACMG guideline for structural variants in general. ACMG covers them 
 
 ## Relevance to the annotation pipeline
 
-The SV/CNA filter and Tier 3 in `2026-04-30_WGS_Nanopore_Annotation_T-ALL` use AnnotSV's `ACMG_class`. That class applies Riggs 2020, the germline dosage-pathogenicity framework [5].
+The SV/CNA filter and Tier 3 use AnnotSV's `ACMG_class`. That class applies Riggs 2020, the germline dosage-pathogenicity framework [5].
 
 For the tumor-only somatic calls in this cohort:
 
