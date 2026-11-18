@@ -1258,6 +1258,8 @@ qmd_computed_defs <- tibble::tribble(
   "ST19_score",       "Top-3 ST19 hit scores, paired positionally with ST19_name; consolidated from score_ST19_Alterations.CNV.Recurrent_{AMP,DEL,GAIN,LOSS}",
   "CNA_TYPE",         "Wakhan copy-number call type derived from CN1/CN2 (GAIN, LOSS, CNLOH); drives tier assignment and colour palette",
   "WAKHAN_TYPE",      "Raw Wakhan classification (integer/integer/cnloh/…), preserved from the caller",
+  "Existing_variation", "Known variants co-located with the call, from the VEP cache (dbSNP rs IDs, COSMIC COSV IDs); alleles are matched where the source publishes them. Joined with \"&\" by FILTER_SNV",
+  "SOMATIC",          "VEP somatic flag for each Existing_variation ID, in the same order and joined with \"&\": 1 = known somatic variant (e.g. COSMIC), 0 = not",
   "CIViC_Consequence","VEP Consequence value from the CIViC INFO tag — compare to the top-level Consequence",
   "CIViC_SYMBOL",     "Gene symbol from the CIViC INFO tag — compare to the top-level SYMBOL",
   "CIViC_Variant_ID", "CIViC internal variant identifier",
@@ -1421,7 +1423,7 @@ if (nrow(pass2_long) > 0) {
 # ── COHORT_MERGE_SV recurrence table (pass 2 only) ─────────────────────────
 # Loaded HERE, ahead of the SV table chunk, because the tiered SV table joins
 # the per-(SAMPLE, ID) recurrence columns in before it is written out and
-# displayed. The Overview page's "Cohort recurrent SVs" card reuses the same
+# displayed. The SV page's "Cohort recurrent SVs" card reuses the same
 # object (chunk cohort-merge-load). On pass 1 params$cohort_recurrent_tsv is
 # "" -- the merge has not run yet -- so jm_recur stays NULL and the SV table
 # carries NA recurrence columns; pass 2 overwrites pass 1's report and TSV.
@@ -2853,7 +2855,7 @@ lollipop_link_display <- if (nrow(lollipop_variants) == 0) tibble::tibble() else
 
 
 
-<!-- scrolling="true": this page holds six rows. With the dashboard default
+<!-- scrolling="true": this page holds four rows. With the dashboard default
      (`scrolling: false`) every page must fit ONE viewport, and the flex layout
      measured on 2026-10-22 gave the two `.fill` table cards 51 px each (widget 15 px)
      -- the tables rendered fully inside and were clipped to a sliver, i.e. "blank".
@@ -2947,210 +2949,6 @@ cat(sprintf(
 ', length(sample_ids), "protein_paint_out"))
 ```
 
-
-## Row {height="620px"}
-
-### SV fusion export {title="SV fusion export (ProteinPaint svfusion format)"}
-
-```{r sv-proteinpaint-build}
-#| echo: false
-#| warning: false
-
-# ── ProteinPaint svfusion export ────────────────────────────────────────────
-# Renders Tier 1 + Tier 2 SVs as a two-breakpoint fusion table for the
-# ProteinPaint gene-fusion app (https://proteinpaint.stjude.org/?appcard=genefusion,
-# or the FusionEditor at /FusionEditor/). Format spec:
-# https://docs.stjude.cloud/visualization-community/proteinpaint/sv-and-fusion-transcript
-#
-# THREE THINGS THE SPEC REQUIRES THAT THE PASS2 TABLE DOES NOT ALREADY SATISFY:
-#   1. positions are 0-BASED   -> POS - 1 (VCF POS is 1-based)
-#   2. chromosomes need "chr"  -> raw CHROM is bare ("21")
-#   3. one row per EVENT       -> an interchromosomal BND is TWO VCF records
-#                                 (both breakends); emitting both duplicates it
-#
-# 5'/3' ASSIGNMENT comes from the ALT bracket orientation, NOT from POS order.
-# VCF 4.2 breakend forms:  t[p[ and t]p]  -> THIS record is 5'
-#                          ]p]t and [p[t  -> the PARTNER is 5'
-# i.e. an ALT beginning with the ref base means this side is 5'. Both mates of a
-# pair independently agree on the assignment, so dedup may keep either one.
-#
-# INS is excluded: END == POS gives no second breakpoint, and ProteinPaint's
-# model is two joined breakpoints. (The spec's "inserted segment" is a different
-# concept — sequence between two breakpoints in an RNA-seq fusion.)
-pp_sv_fusion      <- NULL
-pp_sv_note        <- NULL
-pp_sv_input_json  <- "null"   # JS-safe string of the whole svfusion file
-
-.need <- c("SAMPLE", "CHROM", "POS", "END", "ALT", "SVTYPE", "driver_tier")
-if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
-    nrow(pass2_clean) > 0 && all(.need %in% names(pass2_clean))) {
-
-  .pfx <- function(x) ifelse(is.na(x) | !nzchar(x) | startsWith(x, "chr"),
-                             x, paste0("chr", x))
-  # An isoform accession is only meaningful when ALL of:
-  #   1. the breakpoint lies INSIDE the gene (gene_source == "overlap"). A
-  #      nearest-gene assignment is intergenic by definition, and the spec says
-  #      "leave blank for intergenic break-end" (gene name too).
-  #   2. the gene is protein_coding. With no protein the FusionEditor degrades to a
-  #      featureless box, silently; and labelling a lncRNA / pseudogene breakend
-  #      with a transcript implies a fusion protein that cannot exist.
-  #   3. the accession is Ensembl ENST or RefSeq NM_. EnsDb also surfaces LRG_*
-  #      transcripts (LRG_482t1 for RUNX1, from the LRG_1383 duplicate gene
-  #      record) which the spec does not accept.
-  # Observed 2026-10-02: 0 of 18 exported rows had a blank isoform, so the
-  # intergenic path the spec defines was never exercised.
-  .iso_ok <- function(iso, src, bio) {
-    !is.na(iso) & grepl("^(ENST|NM_)[0-9]+", iso) &
-      !is.na(src) & src == "overlap" &
-      !is.na(bio) & bio == "protein_coding"
-  }
-  # gene / isoform / strand per side come from the EnsDb join above. They are
-  # absent when params$ensembl_db is unset — fall back to blanks, which the
-  # spec permits (renders an intergenic box rather than a protein).
-  .col <- function(nm) if (nm %in% names(pass2_clean)) as.character(pass2_clean[[nm]]) else NA_character_
-
-  .d <- tibble::tibble(
-    SAMPLE = as.character(pass2_clean$SAMPLE),
-    CHROM  = as.character(pass2_clean$CHROM),
-    POS    = suppressWarnings(as.numeric(pass2_clean$POS)),
-    END    = suppressWarnings(as.numeric(pass2_clean$END)),
-    ALT    = as.character(pass2_clean$ALT),
-    SVTYPE = as.character(pass2_clean$SVTYPE),
-    tier   = suppressWarnings(as.integer(pass2_clean$driver_tier)),
-    g_l    = .col("gene_name_left"),            g_r = .col("gene_name_right"),
-    t_l    = .col("canonical_transcript_left"), t_r = .col("canonical_transcript_right"),
-    s_l    = .col("gene_strand_left"),          s_r = .col("gene_strand_right"),
-    b_l    = .col("gene_biotype_left"),         b_r = .col("gene_biotype_right"),
-    o_l    = .col("gene_source_left"),          o_r = .col("gene_source_right"),
-    DV     = .col("DV")
-  ) |>
-    dplyr::filter(!is.na(tier), tier %in% c(1L, 2L)) |>
-    dplyr::filter(SVTYPE != "INS")
-
-  if (nrow(.d) > 0) {
-    .m     <- stringr::str_match(.d$ALT, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
-    .isbnd <- .d$SVTYPE == "BND" | grepl("[\\[\\]]", .d$ALT)
-    .ok    <- !is.na(.m[, 2])
-    .five  <- grepl("^[ACGTNacgtn]", .d$ALT)      # this record is the 5' side
-
-    .d <- .d |>
-      dplyr::mutate(
-        .bnd = .isbnd & .ok,
-        chr_a = .pfx(ifelse(.bnd & !.five, .m[, 2], CHROM)),
-        pos_a = ifelse(.bnd & !.five, suppressWarnings(as.numeric(.m[, 3])), POS),
-        gen_a = ifelse(.bnd & !.five, g_r, g_l),
-        iso_a = ifelse(.bnd & !.five, t_r, t_l),
-        str_a = ifelse(.bnd & !.five, s_r, s_l),
-        bio_a = ifelse(.bnd & !.five, b_r, b_l),
-        src_a = ifelse(.bnd & !.five, o_r, o_l),
-        chr_b = .pfx(ifelse(.bnd, ifelse(.five, .m[, 2], CHROM), CHROM)),
-        pos_b = ifelse(.bnd, ifelse(.five, suppressWarnings(as.numeric(.m[, 3])), POS), END),
-        gen_b = ifelse(.bnd & !.five, g_l, g_r),
-        iso_b = ifelse(.bnd & !.five, t_l, t_r),
-        str_b = ifelse(.bnd & !.five, s_l, s_r),
-        bio_b = ifelse(.bnd & !.five, b_l, b_r),
-        src_b = ifelse(.bnd & !.five, o_l, o_r)
-      ) |>
-      # drop non-BND records that have no usable second breakpoint
-      dplyr::filter(!is.na(pos_a), !is.na(pos_b), pos_a != pos_b | .bnd) |>
-      # one row per event: collapse the two breakends of a BND pair
-      dplyr::mutate(.key = paste(SAMPLE,
-                                 pmin(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)),
-                                 pmax(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)))) |>
-      dplyr::distinct(.key, .keep_all = TRUE)
-
-    # A DEL/DUP/INV whose two breakpoints resolve to the SAME gene is an
-    # intragenic event, not a two-partner fusion. Emitting it as GENE::GENE is
-    # not accurate (LINC00649::LINC00649 and HMGA1P4::HMGA1P4).
-    # Counted into pp_sv_note so the suppression is visible, not silent.
-    .intra <- !is.na(.d$gen_a) & !is.na(.d$gen_b) & nzchar(.d$gen_a) &
-              .d$gen_a == .d$gen_b
-    pp_sv_n_intragenic <- sum(.intra)
-    .d <- .d[!.intra, ]
-
-    .ok_a    <- .iso_ok(.d$iso_a, .d$src_a, .d$bio_a)
-    .ok_b    <- .iso_ok(.d$iso_b, .d$src_b, .d$bio_b)
-    .inter_a <- is.na(.d$src_a) | .d$src_a != "overlap"   # intergenic: blank gene too
-    .inter_b <- is.na(.d$src_b) | .d$src_b != "overlap"
-    pp_sv_n_iso_blank <- sum(!.ok_a & !is.na(.d$iso_a) & nzchar(.d$iso_a)) +
-                         sum(!.ok_b & !is.na(.d$iso_b) & nzchar(.d$iso_b))
-
-    pp_sv_fusion <- .d |>
-      dplyr::transmute(
-        gene_a = ifelse(.inter_a, "", dplyr::coalesce(gen_a, "")),
-        isoform_a = ifelse(.ok_a, iso_a, ""),
-        chr_a, position_a = as.integer(pos_a - 1), strand_a = dplyr::coalesce(str_a, "+"),
-        gene_b = ifelse(.inter_b, "", dplyr::coalesce(gen_b, "")),
-        isoform_b = ifelse(.ok_b, iso_b, ""),
-        chr_b, position_b = as.integer(pos_b - 1), strand_b = dplyr::coalesce(str_b, "+"),
-        Sample = SAMPLE, Sampletype = "diagnosis",
-        SVTYPE, driver_tier = tier, Discordant_readcount = dplyr::coalesce(DV, "")
-      ) |>
-      dplyr::arrange(Sample, chr_a, position_a)
-
-    dir.create("protein_paint_out", showWarnings = FALSE, recursive = TRUE)
-    # Fixed descriptive name, matching the disco_plot_*/lollipop_* convention
-    # used elsewhere in protein_paint_out/ (no PREFIX variable exists here).
-    .out <- file.path("protein_paint_out", "sv_tier1_2.svfusion.txt")
-    readr::write_tsv(pp_sv_fusion, .out, na = "")
-    # fusioneditor expects `input` = the ENTIRE file as one string, "\n" line
-    # breaks, tab-separated, header first. toJSON(auto_unbox) emits a correctly
-    # escaped JS string literal.
-    pp_sv_input_json <- as.character(jsonlite::toJSON(
-      paste(readLines(.out, warn = FALSE), collapse = "\n"), auto_unbox = TRUE))
-    pp_sv_note <- sprintf(paste0(
-        "%d event(s) across %d sample(s) &rarr; <code>%s</code>; ",
-        "%d same-gene intragenic event(s) excluded; ",
-        "%d isoform(s) blanked (intergenic, non-coding, or non-ENST/NM accession)"),
-      nrow(pp_sv_fusion), dplyr::n_distinct(pp_sv_fusion$Sample), .out,
-      pp_sv_n_intragenic, pp_sv_n_iso_blank)
-  } else {
-    pp_sv_note <- "No Tier 1/2 SVs with two breakpoints."
-  }
-} else {
-  pp_sv_note <- "pass2_clean unavailable or missing required columns."
-}
-```
-
-```{r sv-proteinpaint-table}
-#| echo: false
-if (!is.null(pp_sv_fusion) && nrow(pp_sv_fusion) > 0) {
-  DT::datatable(
-    pp_sv_fusion,
-    rownames   = FALSE,
-    # No Scroller here. Quarto dashboards render DT with fillContainer=TRUE,
-    # which DISABLES paging (bPaginate=false on every widget); Scroller requires
-    # paging and logs "Pagination must be enabled for Scroller" then draws
-    # nothing -- the table came out blank (observed 2026-10-08 render). The
-    # fill container already provides vertical scrolling.
-    extensions = "Buttons",
-    options = list(
-      dom = "Bfrtip", buttons = list("copy", list(extend = "csv", text = "Download svfusion")),
-      scrollX = TRUE
-    ),
-    caption = htmltools::tags$caption(
-      style = "caption-side: top; text-align: left; font-size:0.9em;",
-      htmltools::HTML(paste0(
-        "ProteinPaint <b>svfusion</b> track input &mdash; Tier 1 + Tier 2, one row per event. ",
-        "Positions are <b>0-based</b> per the SV/fusion-transcript format spec. ",
-        "Intergenic breakends carry no gene/isoform; non-coding breakends no isoform."))))
-} else {
-  htmltools::HTML(paste0("<p style='color:#666;'>", pp_sv_note, "</p>"))
-}
-```
-
-<!-- The FusionEditor embed that used to sit here was retired 2026-10-22. It drew a
-     fusion PROTEIN for every event, which is the wrong model for enhancer-hijacking
-     SVs (e.g. BCL11B -> TLX3), and in a live browser the app rejected the file
-     outright ("File header error: geneA missing": the editor wants camelCase
-     headers, not the svfusion track columns). The table above is the deliverable;
-     SV/CNA visualisation moves to GenomePaint (notes, REMAINING). -->
-::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
-SV fusion export &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
-Genome build `r pp_genome`. BND mate pairs are collapsed to one event; INS is excluded
-(no second breakpoint); same-gene DEL/DUP/INV are excluded (intragenic, not a fusion).
-An isoform is given only where the breakpoint lies inside a protein-coding gene with an ENST/NM accession — otherwise it is blank per the svfusion spec, and an intergenic breakend has its gene blanked too.
-:::
 
 ## Row {height="150px"}
 
@@ -3254,66 +3052,6 @@ if (!is.null(jm_summary)) {
 }
 ```
 
-<!-- The recurrence DT gets a row of its own, and shares its card only with
-     the merged-VCF header note. When the summary kable, the DT and the note
-     were three cells under one heading in a single 620-px row, Quarto laid
-     them out as three cards and the table card came out 217 px tall with
-     zero rows visible (observed 2026-10-22). -->
-
-## Row {height="640px"}
-
-:::: {.card title="Cohort recurrent SVs (Jasmine merge)"}
-
-```{r cohort-merge-table}
-#| echo: false
-#| column: screen-inset
-if (!is.null(jm_recur) && nrow(jm_recur) > 0) {
-  jm_display <- jm_recur |>
-    dplyr::mutate(
-      dplyr::across(dplyr::any_of("driver_tier"), tier_factor),
-      # gene_name is AnnotSV's "|"-joined Gene_name (every gene a large DEL
-      # spans; 130 symbols on the test fixture) and clinvar_clnsig is VEP's
-      # "&"-joined per-overlap CLNSIG (50 copies of "Pathogenic"); both arrive
-      # verbatim from JASMINE_CLUSTER_MAP. Compacted for display only --
-      # cohort_sv_recurrent.tsv keeps the full strings.
-      dplyr::across(dplyr::any_of(c("gene_name", "clinvar_clnsig")),
-                    compact_list_cell)) |>
-    dt_guard_cells()
-  DT::datatable(
-    jm_display,
-    escape     = FALSE,
-    filter     = "top",
-    rownames   = FALSE,
-    width      = "100%",
-    # No Scroller: see the svfusion table -- dashboard fillContainer disables
-    # paging, Scroller requires it, result was an empty body.
-    extensions = "Buttons",
-    options = list(
-      dom     = "Bfrtip",
-      buttons = list("copy", list(extend = "csv", text = "Download recurrence TSV")),
-      scrollX = TRUE
-    ),
-    caption = htmltools::tags$caption(
-      style = "caption-side: top; text-align: left; font-size:0.9em;",
-      htmltools::HTML(paste0(
-        "Jasmine cohort merge &mdash; one row per (cluster &times; sample). ",
-        "<code>record_class</code> is TIERED when the row is in this report's ",
-        "tiered table, and RESCUED when it is a sub-threshold call recovered ",
-        "from the pre-filter VEP VCF. <code>n_tiered</code> against ",
-        "<code>n_any</code> separates over-filtering from lack of ",
-        "corroboration.")))) |>
-    dt_style_pills()
-} else {
-  htmltools::HTML(paste0("<p style='color:#666; margin:10px 0;'>", jm_note, "</p>"))
-}
-```
-
-::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
-`r if (!is.null(jm_hdr_note)) htmltools::HTML(jm_hdr_note) else "Merged VCF not staged in this render."`
-:::
-
-::::
-
 ## Row {height="380px"}
 
 ### Per-sample AnnotSV summary {title="Per-sample AnnotSV summary"}
@@ -3338,9 +3076,12 @@ DT::datatable(
 ```
 
 
-# SV
+<!-- scrolling="true": with the svfusion export and the Jasmine recurrence table
+     moved here from the Overview page (2026-11-18) this page holds four rows, so it
+     scrolls and every row gets a fixed height (see the Overview page comment). -->
+# SV {scrolling="true"}
 
-## Row {height="45%" .tabset}
+## Row {height="480px" .tabset}
 
 ### SVTYPE {title="SVTYPE distribution"}
 
@@ -3590,7 +3331,7 @@ ggplotly(p_tier, tooltip = "text") |> config(displayModeBar = FALSE)
 
 
 
-## Row {height="55%"}
+## Row {height="760px"}
 
 ### SV pass2 table {title="SV pass2 variant table" fill="true"}
 
@@ -3657,6 +3398,355 @@ DT::datatable(
 ) |>
   dt_style_pills(type_col = "SVTYPE", type_palette = svtype_colors)
 ```
+
+## Row {height="620px"}
+
+### SV fusion export {title="SV fusion export (ProteinPaint svfusion format)"}
+
+```{r sv-proteinpaint-build}
+#| echo: false
+#| warning: false
+
+# ── ProteinPaint svfusion export ────────────────────────────────────────────
+# Renders Tier 1 + Tier 2 SVs as a two-breakpoint fusion table for the
+# ProteinPaint gene-fusion app (https://proteinpaint.stjude.org/?appcard=genefusion,
+# or the FusionEditor at /FusionEditor/). Format spec:
+# https://docs.stjude.cloud/visualization-community/proteinpaint/sv-and-fusion-transcript
+#
+# THREE THINGS THE SPEC REQUIRES THAT THE PASS2 TABLE DOES NOT ALREADY SATISFY:
+#   1. positions are 0-BASED   -> POS - 1 (VCF POS is 1-based)
+#   2. chromosomes need "chr"  -> raw CHROM is bare ("21")
+#   3. one row per EVENT       -> an interchromosomal BND is TWO VCF records
+#                                 (both breakends); emitting both duplicates it
+#
+# 5'/3' ASSIGNMENT comes from the ALT bracket orientation, NOT from POS order.
+# VCF 4.2 breakend forms:  t[p[ and t]p]  -> THIS record is 5'
+#                          ]p]t and [p[t  -> the PARTNER is 5'
+# i.e. an ALT beginning with the ref base means this side is 5'. Both mates of a
+# pair independently agree on the assignment, so dedup may keep either one.
+#
+# INS is excluded: END == POS gives no second breakpoint, and ProteinPaint's
+# model is two joined breakpoints. (The spec's "inserted segment" is a different
+# concept — sequence between two breakpoints in an RNA-seq fusion.)
+pp_sv_fusion      <- NULL
+pp_sv_note        <- NULL
+pp_sv_genefusion      <- NULL  # the same events as Gene Fusion app lines (Format 1)
+pp_sv_genefusion_note <- NULL
+pp_sv_input_json  <- "null"   # JS-safe string of the whole svfusion file
+
+.need <- c("SAMPLE", "CHROM", "POS", "END", "ALT", "SVTYPE", "driver_tier")
+if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
+    nrow(pass2_clean) > 0 && all(.need %in% names(pass2_clean))) {
+
+  .pfx <- function(x) ifelse(is.na(x) | !nzchar(x) | startsWith(x, "chr"),
+                             x, paste0("chr", x))
+  # An isoform accession is only meaningful when ALL of:
+  #   1. the breakpoint lies INSIDE the gene (gene_source == "overlap"). A
+  #      nearest-gene assignment is intergenic by definition, and the spec says
+  #      "leave blank for intergenic break-end" (gene name too).
+  #   2. the gene is protein_coding. With no protein the FusionEditor degrades to a
+  #      featureless box, silently; and labelling a lncRNA / pseudogene breakend
+  #      with a transcript implies a fusion protein that cannot exist.
+  #   3. the accession is Ensembl ENST or RefSeq NM_. EnsDb also surfaces LRG_*
+  #      transcripts (LRG_482t1 for RUNX1, from the LRG_1383 duplicate gene
+  #      record) which the spec does not accept.
+  # Observed 2026-10-02: 0 of 18 exported rows had a blank isoform, so the
+  # intergenic path the spec defines was never exercised.
+  .iso_ok <- function(iso, src, bio) {
+    !is.na(iso) & grepl("^(ENST|NM_)[0-9]+", iso) &
+      !is.na(src) & src == "overlap" &
+      !is.na(bio) & bio == "protein_coding"
+  }
+  # gene / isoform / strand per side come from the EnsDb join above. They are
+  # absent when params$ensembl_db is unset — fall back to blanks, which the
+  # spec permits (renders an intergenic box rather than a protein).
+  .col <- function(nm) if (nm %in% names(pass2_clean)) as.character(pass2_clean[[nm]]) else NA_character_
+
+  .d <- tibble::tibble(
+    SAMPLE = as.character(pass2_clean$SAMPLE),
+    CHROM  = as.character(pass2_clean$CHROM),
+    POS    = suppressWarnings(as.numeric(pass2_clean$POS)),
+    END    = suppressWarnings(as.numeric(pass2_clean$END)),
+    ALT    = as.character(pass2_clean$ALT),
+    SVTYPE = as.character(pass2_clean$SVTYPE),
+    tier   = suppressWarnings(as.integer(pass2_clean$driver_tier)),
+    g_l    = .col("gene_name_left"),            g_r = .col("gene_name_right"),
+    t_l    = .col("canonical_transcript_left"), t_r = .col("canonical_transcript_right"),
+    s_l    = .col("gene_strand_left"),          s_r = .col("gene_strand_right"),
+    b_l    = .col("gene_biotype_left"),         b_r = .col("gene_biotype_right"),
+    o_l    = .col("gene_source_left"),          o_r = .col("gene_source_right"),
+    DV     = .col("DV")
+  ) |>
+    dplyr::filter(!is.na(tier), tier %in% c(1L, 2L)) |>
+    dplyr::filter(SVTYPE != "INS")
+
+  if (nrow(.d) > 0) {
+    .m     <- stringr::str_match(.d$ALT, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
+    .isbnd <- .d$SVTYPE == "BND" | grepl("[\\[\\]]", .d$ALT)
+    .ok    <- !is.na(.m[, 2])
+    .five  <- grepl("^[ACGTNacgtn]", .d$ALT)      # this record is the 5' side
+
+    .d <- .d |>
+      dplyr::mutate(
+        .bnd = .isbnd & .ok,
+        chr_a = .pfx(ifelse(.bnd & !.five, .m[, 2], CHROM)),
+        pos_a = ifelse(.bnd & !.five, suppressWarnings(as.numeric(.m[, 3])), POS),
+        gen_a = ifelse(.bnd & !.five, g_r, g_l),
+        iso_a = ifelse(.bnd & !.five, t_r, t_l),
+        str_a = ifelse(.bnd & !.five, s_r, s_l),
+        bio_a = ifelse(.bnd & !.five, b_r, b_l),
+        src_a = ifelse(.bnd & !.five, o_r, o_l),
+        chr_b = .pfx(ifelse(.bnd, ifelse(.five, .m[, 2], CHROM), CHROM)),
+        pos_b = ifelse(.bnd, ifelse(.five, suppressWarnings(as.numeric(.m[, 3])), POS), END),
+        gen_b = ifelse(.bnd & !.five, g_l, g_r),
+        iso_b = ifelse(.bnd & !.five, t_l, t_r),
+        str_b = ifelse(.bnd & !.five, s_l, s_r),
+        bio_b = ifelse(.bnd & !.five, b_l, b_r),
+        src_b = ifelse(.bnd & !.five, o_l, o_r)
+      ) |>
+      # drop non-BND records that have no usable second breakpoint
+      dplyr::filter(!is.na(pos_a), !is.na(pos_b), pos_a != pos_b | .bnd) |>
+      # one row per event: collapse the two breakends of a BND pair
+      dplyr::mutate(.key = paste(SAMPLE,
+                                 pmin(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)),
+                                 pmax(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)))) |>
+      dplyr::distinct(.key, .keep_all = TRUE)
+
+    # A DEL/DUP/INV whose two breakpoints resolve to the SAME gene is an
+    # intragenic event, not a two-partner fusion. Emitting it as GENE::GENE is
+    # not accurate (LINC00649::LINC00649 and HMGA1P4::HMGA1P4).
+    # Counted into pp_sv_note so the suppression is visible, not silent.
+    .intra <- !is.na(.d$gen_a) & !is.na(.d$gen_b) & nzchar(.d$gen_a) &
+              .d$gen_a == .d$gen_b
+    pp_sv_n_intragenic <- sum(.intra)
+    .d <- .d[!.intra, ]
+
+    .ok_a    <- .iso_ok(.d$iso_a, .d$src_a, .d$bio_a)
+    .ok_b    <- .iso_ok(.d$iso_b, .d$src_b, .d$bio_b)
+    .inter_a <- is.na(.d$src_a) | .d$src_a != "overlap"   # intergenic: blank gene too
+    .inter_b <- is.na(.d$src_b) | .d$src_b != "overlap"
+    pp_sv_n_iso_blank <- sum(!.ok_a & !is.na(.d$iso_a) & nzchar(.d$iso_a)) +
+                         sum(!.ok_b & !is.na(.d$iso_b) & nzchar(.d$iso_b))
+
+    pp_sv_fusion <- .d |>
+      dplyr::transmute(
+        gene_a = ifelse(.inter_a, "", dplyr::coalesce(gen_a, "")),
+        isoform_a = ifelse(.ok_a, iso_a, ""),
+        chr_a, position_a = as.integer(pos_a - 1), strand_a = dplyr::coalesce(str_a, "+"),
+        gene_b = ifelse(.inter_b, "", dplyr::coalesce(gen_b, "")),
+        isoform_b = ifelse(.ok_b, iso_b, ""),
+        chr_b, position_b = as.integer(pos_b - 1), strand_b = dplyr::coalesce(str_b, "+"),
+        Sample = SAMPLE, Sampletype = "diagnosis",
+        SVTYPE, driver_tier = tier, Discordant_readcount = dplyr::coalesce(DV, "")
+      ) |>
+      dplyr::arrange(Sample, chr_a, position_a)
+
+    dir.create("protein_paint_out", showWarnings = FALSE, recursive = TRUE)
+    # Fixed descriptive name, matching the disco_plot_*/lollipop_* convention
+    # used elsewhere in protein_paint_out/ (no PREFIX variable exists here).
+    .out <- file.path("protein_paint_out", "sv_tier1_2.svfusion.txt")
+    readr::write_tsv(pp_sv_fusion, .out, na = "")
+    # fusioneditor expects `input` = the ENTIRE file as one string, "\n" line
+    # breaks, tab-separated, header first. toJSON(auto_unbox) emits a correctly
+    # escaped JS string literal.
+    pp_sv_input_json <- as.character(jsonlite::toJSON(
+      paste(readLines(.out, warn = FALSE), collapse = "\n"), auto_unbox = TRUE))
+    pp_sv_note <- sprintf(paste0(
+        "%d event(s) across %d sample(s) &rarr; <code>%s</code>; ",
+        "%d same-gene intragenic event(s) excluded; ",
+        "%d isoform(s) blanked (intergenic, non-coding, or non-ENST/NM accession)"),
+      nrow(pp_sv_fusion), dplyr::n_distinct(pp_sv_fusion$Sample), .out,
+      pp_sv_n_intragenic, pp_sv_n_iso_blank)
+
+    # ── ProteinPaint Gene Fusion app input, Format 1 ─────────────────────────
+    # https://proteinpaint.stjude.org/?appcard=genefusion. One two-gene fusion
+    # product per line, 5' gene first, each gene as "symbol,chr,position,strand"
+    # (position 1-based) and the two joined by "::", e.g.
+    #   BCR,chr22,23524427,+::ABL1,chr9,133729449,+
+    # The app draws one tab per named gene and shows data only when at least one
+    # breakpoint lies inside a gene (tested in the app 2026-11-18). So:
+    #   both breakends inside (gene_source "overlap") two different genes: a
+    #     fusion product. 5'/3' comes from the junction and the gene strands, per
+    #     breakend: the gene contributes its 5' part when the segment kept at the
+    #     junction lies LEFT of the breakpoint and the gene is on "+", or RIGHT and
+    #     on "-". A product needs exactly one 5' and one 3' partner; otherwise the
+    #     join is antisense and is skipped.
+    #   one breakend intergenic (e.g. BCL11B with the TLX3 region in t(5;14)): the
+    #     in-gene partner first, then the intergenic breakend named by its nearest
+    #     gene and that gene's strand. There is no fusion transcript, so no 5'/3'.
+    #   both breakends intergenic: skipped, the app shows nothing.
+    # Kept side per record type:
+    #   BND  ALT t[p[ / t]p]: this side LEFT;  ]p]t / [p[t: this side RIGHT;
+    #        partner RIGHT when the bracket is "[", LEFT when it is "]"
+    #   DEL  POS LEFT, END RIGHT     DUP  POS RIGHT, END LEFT
+    #   INV  two junctions: POS LEFT + END LEFT, and POS RIGHT + END RIGHT
+    .gf_side <- function(chr, pos, gene, strand, src)
+      list(chr = chr, pos = pos, gene = dplyr::coalesce(gene, ""),
+           strand = dplyr::coalesce(strand, ""), genic = !is.na(src) & src == "overlap")
+    # Returns the line named by its kind ("fusion" / "one_intergenic"), or NA.
+    .gf_line <- function(a, ka, b, kb) {
+      usable <- function(p) nzchar(p$gene) && p$strand %in% c("+", "-") && !is.na(p$pos)
+      if (!usable(a) || !usable(b) || a$gene == b$gene || (!a$genic && !b$genic))
+        return(NA_character_)
+      fmt <- function(p) paste(p$gene, p$chr, format(p$pos, scientific = FALSE, trim = TRUE),
+                               p$strand, sep = ",")
+      if (a$genic != b$genic) {                          # one intergenic breakend
+        g <- if (a$genic) a else b; n <- if (a$genic) b else a
+        return(c(one_intergenic = paste0(fmt(g), "::", fmt(n))))
+      }
+      five <- function(k, s) (k == "L" && s == "+") || (k == "R" && s == "-")
+      fa <- five(ka, a$strand); fb <- five(kb, b$strand)
+      if (fa == fb) return(NA_character_)              # both 5' or both 3': antisense
+      p5 <- if (fa) a else b; p3 <- if (fa) b else a
+      c(fusion = paste0(fmt(p5), "::", fmt(p3)))
+    }
+    .gm <- stringr::str_match(.d$ALT, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
+    pp_sv_genefusion <- character(0)
+    for (i in seq_len(nrow(.d))) {
+      .this <- .gf_side(.pfx(.d$CHROM[i]), .d$POS[i], .d$g_l[i], .d$s_l[i], .d$o_l[i])
+      .othr <- .gf_side(if (.d$.bnd[i]) .pfx(.gm[i, 2]) else .pfx(.d$CHROM[i]),
+                        if (.d$.bnd[i]) suppressWarnings(as.numeric(.gm[i, 3])) else .d$END[i],
+                        .d$g_r[i], .d$s_r[i], .d$o_r[i])
+      .junctions <- if (.d$.bnd[i]) {
+        list(c(if (grepl("^[ACGTNacgtn]", .d$ALT[i])) "L" else "R",
+               if (grepl("\\[", .d$ALT[i])) "R" else "L"))
+      } else switch(.d$SVTYPE[i],
+        DEL = list(c("L", "R")),
+        DUP = list(c("R", "L")),
+        INV = list(c("L", "L"), c("R", "R")),
+        list())
+      for (k in .junctions)
+        pp_sv_genefusion <- c(pp_sv_genefusion, .gf_line(.this, k[1], .othr, k[2]))
+    }
+    pp_sv_genefusion <- pp_sv_genefusion[!is.na(pp_sv_genefusion)]
+    pp_sv_genefusion <- pp_sv_genefusion[!duplicated(pp_sv_genefusion)]
+    .gf_n <- table(factor(names(pp_sv_genefusion), levels = c("fusion", "one_intergenic")))
+    .gf_out <- file.path("protein_paint_out", "sv_tier1_2.genefusion.txt")
+    if (length(pp_sv_genefusion) > 0) writeLines(unname(pp_sv_genefusion), .gf_out)
+    pp_sv_genefusion_note <- if (length(pp_sv_genefusion) > 0) {
+      sprintf(paste0(
+        "Gene Fusion app input (Format 1): <a href=\"%s\" download><code>%s</code></a>, ",
+        "%d line(s) from %d event(s): %d with both breakpoints in genes (5' gene first) and ",
+        "%d with one intergenic breakpoint (in-gene partner first; the intergenic side is ",
+        "named by its nearest gene). Events with both breakpoints intergenic, or two genes ",
+        "joined antisense, are left out. Paste the lines into ",
+        "<a href=\"https://proteinpaint.stjude.org/?appcard=genefusion\" target=\"_blank\">",
+        "the ProteinPaint Gene Fusion app</a>."),
+        .gf_out, .gf_out, length(pp_sv_genefusion), nrow(.d),
+        .gf_n[["fusion"]], .gf_n[["one_intergenic"]])
+    } else {
+      paste0("Gene Fusion app input: no event has a breakpoint inside a gene (antisense ",
+             "two-gene joins are left out), so no file was written.")
+    }
+  } else {
+    pp_sv_note <- "No Tier 1/2 SVs with two breakpoints."
+  }
+} else {
+  pp_sv_note <- "pass2_clean unavailable or missing required columns."
+}
+```
+
+```{r sv-proteinpaint-table}
+#| echo: false
+if (!is.null(pp_sv_fusion) && nrow(pp_sv_fusion) > 0) {
+  DT::datatable(
+    pp_sv_fusion,
+    rownames   = FALSE,
+    # No Scroller here. Quarto dashboards render DT with fillContainer=TRUE,
+    # which DISABLES paging (bPaginate=false on every widget); Scroller requires
+    # paging and logs "Pagination must be enabled for Scroller" then draws
+    # nothing -- the table came out blank (observed 2026-10-08 render). The
+    # fill container already provides vertical scrolling.
+    extensions = "Buttons",
+    options = list(
+      dom = "Bfrtip", buttons = list("copy", list(extend = "csv", text = "Download svfusion")),
+      scrollX = TRUE
+    ),
+    caption = htmltools::tags$caption(
+      style = "caption-side: top; text-align: left; font-size:0.9em;",
+      htmltools::HTML(paste0(
+        "ProteinPaint <b>svfusion</b> track input &mdash; Tier 1 + Tier 2, one row per event. ",
+        "Positions are <b>0-based</b> per the SV/fusion-transcript format spec. ",
+        "Intergenic breakends carry no gene/isoform; non-coding breakends no isoform."))))
+} else {
+  htmltools::HTML(paste0("<p style='color:#666;'>", pp_sv_note, "</p>"))
+}
+```
+
+<!-- The FusionEditor embed that used to sit here was retired 2026-10-22. It drew a
+     fusion PROTEIN for every event, which is the wrong model for enhancer-hijacking
+     SVs (e.g. BCL11B -> TLX3), and in a live browser the app rejected the svfusion
+     file outright ("File header error: geneA missing": the editor reads CICERO
+     headers, not the svfusion track columns). The embed stays retired; the
+     two-gene products are also written as Gene Fusion app input (Format 1). -->
+::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
+SV fusion export &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
+`r if (!is.null(pp_sv_genefusion_note)) htmltools::HTML(pp_sv_genefusion_note) else ""`
+Genome build `r pp_genome`. BND mate pairs are collapsed to one event; INS is excluded
+(no second breakpoint); same-gene DEL/DUP/INV are excluded (intragenic, not a fusion).
+An isoform is given only where the breakpoint lies inside a protein-coding gene with an ENST/NM accession — otherwise it is blank per the svfusion spec, and an intergenic breakend has its gene blanked too.
+:::
+
+<!-- The recurrence DT gets a row of its own, and shares its card only with
+     the merged-VCF header note. When the summary kable, the DT and the note
+     were three cells under one heading in a single 620-px row, Quarto laid
+     them out as three cards and the table card came out 217 px tall with
+     zero rows visible (observed 2026-10-22). -->
+
+## Row {height="640px"}
+
+:::: {.card title="Cohort recurrent SVs (Jasmine merge)"}
+
+```{r cohort-merge-table}
+#| echo: false
+#| column: screen-inset
+if (!is.null(jm_recur) && nrow(jm_recur) > 0) {
+  jm_display <- jm_recur |>
+    dplyr::mutate(
+      dplyr::across(dplyr::any_of("driver_tier"), tier_factor),
+      # gene_name is AnnotSV's "|"-joined Gene_name (every gene a large DEL
+      # spans; 130 symbols on the test fixture) and clinvar_clnsig is VEP's
+      # "&"-joined per-overlap CLNSIG (50 copies of "Pathogenic"); both arrive
+      # verbatim from JASMINE_CLUSTER_MAP. Compacted for display only --
+      # cohort_sv_recurrent.tsv keeps the full strings.
+      dplyr::across(dplyr::any_of(c("gene_name", "clinvar_clnsig")),
+                    compact_list_cell)) |>
+    dt_guard_cells()
+  DT::datatable(
+    jm_display,
+    escape     = FALSE,
+    filter     = "top",
+    rownames   = FALSE,
+    width      = "100%",
+    # No Scroller: see the svfusion table -- dashboard fillContainer disables
+    # paging, Scroller requires it, result was an empty body.
+    extensions = "Buttons",
+    options = list(
+      dom     = "Bfrtip",
+      buttons = list("copy", list(extend = "csv", text = "Download recurrence TSV")),
+      scrollX = TRUE
+    ),
+    caption = htmltools::tags$caption(
+      style = "caption-side: top; text-align: left; font-size:0.9em;",
+      htmltools::HTML(paste0(
+        "Jasmine cohort merge &mdash; one row per (cluster &times; sample). ",
+        "<code>record_class</code> is TIERED when the row is in this report's ",
+        "tiered table, and RESCUED when it is a sub-threshold call recovered ",
+        "from the pre-filter VEP VCF. <code>n_tiered</code> against ",
+        "<code>n_any</code> separates over-filtering from lack of ",
+        "corroboration.")))) |>
+    dt_style_pills()
+} else {
+  htmltools::HTML(paste0("<p style='color:#666; margin:10px 0;'>", jm_note, "</p>"))
+}
+```
+
+::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
+`r if (!is.null(jm_hdr_note)) htmltools::HTML(jm_hdr_note) else "Merged VCF not staged in this render."`
+:::
+
+::::
+
 
 # CNA
 
@@ -3819,7 +3909,7 @@ snv_display_cols <- c(
   "CLAIRSTO_VAF", "DEEPSOMATIC_VAF",
   "SYMBOL", "Consequence", "IMPACT",
   "HGVSc", "HGVSp", "SIFT", "PolyPhen",
-  "gnomADg_AF", "CLNSIG", "CLNREVSTAT",
+  "gnomADg_AF", "Existing_variation", "SOMATIC", "CLNSIG", "CLNREVSTAT",
   "SCI", "ONC",
   # CIViC-derived interpretive columns (parsed from CIVIC INFO field).
   # SYMBOL / Consequence appear twice — VEP-derived above, CIViC-derived
@@ -4200,7 +4290,7 @@ snv_dict_cols <- intersect(c(
   "CLAIRSTO_VAF", "DEEPSOMATIC_VAF",
   "SYMBOL", "Consequence", "IMPACT",
   "HGVSc", "HGVSp", "SIFT", "PolyPhen",
-  "gnomADg_AF", "CLNSIG", "CLNREVSTAT",
+  "gnomADg_AF", "Existing_variation", "SOMATIC", "CLNSIG", "CLNREVSTAT",
   "SCI", "ONC",
   "CIViC_Consequence", "CIViC_SYMBOL",
   "CIViC_Variant_ID", "CIViC_Variant_URL",

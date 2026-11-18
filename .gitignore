@@ -38,3 +38,4 @@ retrieve*.py
 .nf-test.log
 # nf-test's temporary wrapper scripts in the repo root (left behind by an interrupted run)
 .nf-test-*.nf
+00_archive

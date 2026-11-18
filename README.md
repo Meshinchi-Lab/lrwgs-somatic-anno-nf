@@ -488,7 +488,8 @@ results/
 ├── cohort_merge_sv/       # cohort_sv.regions.bed, cohort.sv.merged.vcf.gz, cohort_sv_recurrent.tsv (+ .map.tsv)
 ├── genomic_viz/           # inputs/ (links, cna, labels, counts, cohort.maf, cohort.cn.tsv, oncoprint_genes.txt), circos/ (<set>.circos.png|svg), oncoplot/ (cohort.oncoprint.png|svg, onco_matrix.txt, summaries)
 ├── sv_report/viz/         # the same files re-published beside index.html for the Cohort figures page
-├── sv_report/             # cohort-level Quarto HTML report (index.html) + cohort_{sv,cna}_pass2.tsv, cohort_snv.tsv
+├── sv_report/             # cohort-level Quarto HTML report (index.html) + cohort_{sv,cna}_pass2.tsv, cohort_snv.tsv;
+│                          #   protein_paint_out/: DISCO HTMLs, sv_tier1_2.svfusion.txt and sv_tier1_2.genefusion.txt (Gene Fusion app input, Format 1)
 └── pipeline_info/         # execution timeline, report, trace, DAG
 ```
 

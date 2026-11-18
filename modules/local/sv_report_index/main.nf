@@ -67,6 +67,9 @@ process SV_REPORT_INDEX {
     // ProteinPaint gene-fusion input (Tier 1 + Tier 2 SVs, svfusion format).
     // Separate declaration because the HTML glob above does not match *.txt.
     path "protein_paint_out/*.svfusion.txt", optional: true, emit: sv_fusion_pp
+    // Two-gene products of the same events, as ProteinPaint Gene Fusion app
+    // input (Format 1); not written when no event joins two genes in sense.
+    path "protein_paint_out/*.genefusion.txt", optional: true, emit: sv_fusion_genefusion
     // Re-publish the per-variant-type VCF header data dictionaries that
     // were staged into this task as inputs. Making them outputs of
     // SV_REPORT_INDEX causes publishDir to copy them into
