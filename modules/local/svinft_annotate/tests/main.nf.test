@@ -1,20 +1,20 @@
-// modules/local/st17_svinft/tests/main.nf.test
+// modules/local/svinft_annotate/tests/main.nf.test
 nextflow_process {
 
-    name "Test Process ST17_SVINFT"
+    name "Test Process SVINFT_ANNOTATE"
     script "../main.nf"
-    process "ST17_SVINFT"
+    process "SVINFT_ANNOTATE"
     tag "modules"
-    tag "st17_svinft"
+    tag "svinft_annotate"
 
     test("coverage 0.5 - partial, containing and contained matches; Mb-scale and low-coverage entries rejected") {
         when {
             process {
                 """
-                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                def fx = "\${projectDir}/tests/fixtures/svinft_annotate"
                 input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
-                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
-                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[1] = file("\${fx}/ref_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/ref_dup.bed", checkIfExists: true)
                 input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
                 input[4] = 0.5
                 """
@@ -23,12 +23,12 @@ nextflow_process {
         then {
             assert process.success
             def out = file(process.out.tsv[0][1])
-            assert out.name == 'S1.st17_svinft.filtered.pass2.tsv'   // new name; matches the report's glob
-            def inLines  = file("${projectDir}/tests/fixtures/st17_svinft/pass2.tsv").readLines()
+            assert out.name == 'S1.svinft.filtered.pass2.tsv'   // new name; matches the report's glob
+            def inLines  = file("${projectDir}/tests/fixtures/svinft_annotate/pass2.tsv").readLines()
             assert inLines.size() == 8 && !inLines[0].contains('SVinFt')   // the input fixture is untouched
             def outLines = out.readLines()
             assert outLines.size() == inLines.size()
-            assert outLines[0] == inLines[0] + '\tST17_DEL_SVinFt\tST17_DUP_SVinFt'
+            assert outLines[0] == inLines[0] + '\tSVinFt_DEL\tSVinFt_DUP'
             // every original column is written back unchanged, quotes included
             outLines.drop(1).eachWithIndex { line, i ->
                 def f = line.split('\t', -1)
@@ -56,10 +56,10 @@ nextflow_process {
         when {
             process {
                 """
-                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                def fx = "\${projectDir}/tests/fixtures/svinft_annotate"
                 input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
-                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
-                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[1] = file("\${fx}/ref_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/ref_dup.bed", checkIfExists: true)
                 input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
                 input[4] = 0.9
                 """
@@ -79,10 +79,10 @@ nextflow_process {
         when {
             process {
                 """
-                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                def fx = "\${projectDir}/tests/fixtures/svinft_annotate"
                 input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
-                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
-                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[1] = file("\${fx}/ref_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/ref_dup.bed", checkIfExists: true)
                 input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
                 input[4] = 0
                 """
@@ -99,10 +99,10 @@ nextflow_process {
         when {
             process {
                 """
-                def fx = "\${projectDir}/tests/fixtures/st17_svinft"
+                def fx = "\${projectDir}/tests/fixtures/svinft_annotate"
                 input[0] = [ [ id: 'S1' ], file("\${fx}/pass2.tsv", checkIfExists: true) ]
-                input[1] = file("\${fx}/st17_del.bed", checkIfExists: true)
-                input[2] = file("\${fx}/st17_dup.bed", checkIfExists: true)
+                input[1] = file("\${fx}/ref_del.bed", checkIfExists: true)
+                input[2] = file("\${fx}/ref_dup.bed", checkIfExists: true)
                 input[3] = file("\${fx}/ensdb_chromosomes.sqlite", checkIfExists: true)
                 input[4] = 0.5
                 """
@@ -111,7 +111,7 @@ nextflow_process {
         then {
             assert process.success
             def lines = file(process.out.tsv[0][1]).readLines()
-            assert lines[0].endsWith('\tST17_DEL_SVinFt\tST17_DUP_SVinFt')
+            assert lines[0].endsWith('\tSVinFt_DEL\tSVinFt_DUP')
             assert lines.size() == 8
         }
     }

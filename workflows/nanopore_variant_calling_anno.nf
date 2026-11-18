@@ -20,7 +20,7 @@ include { SV_REPORT_INDEX as SV_REPORT_INDEX_COHORT } from '../modules/local/sv_
 include { COHORT_MERGE_SV    } from '../subworkflows/local/cohort_merge_sv/main'
 include { GENOMIC_VIZ        } from '../subworkflows/local/genomic_viz/main'
 include { FILTER_SV          } from '../subworkflows/local/filter_sv/main'
-include { ST17_SVINFT        } from '../modules/local/st17_svinft/main'
+include { SVINFT_ANNOTATE    } from '../modules/local/svinft_annotate/main'
 include { ANNOTATIONS_CNA   } from '../subworkflows/local/annotations_cna'
 include { FILTER_CNA        } from '../subworkflows/local/filter_cna/main'
 include { IGV_REPORTS_SV     } from '../subworkflows/local/igv_reports/main'
@@ -331,32 +331,32 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     )
 
     //
-    // ── ST17_SVINFT — same-type ST17 DEL/DUP matches on the pass-2 tables ──
-    // AnnotSV attaches an ST17 DEL/DUP entry only when it lies inside the called SV
-    // (FtIncludedInSV), so a precise call slightly inside its published counterpart is
-    // missed. ST17_SVINFT adds same-type entries the SV covers by at least
-    // svinft_min_ref_coverage of their length; the report merges both before its ST17
-    // cleaning step. Skipped, with a warning, when either BED or ensembl_db is unset or not
-    // found: the report then uses AnnotSV's matches alone.
+    // ── SVINFT_ANNOTATE — same-type reference DEL/DUP matches on the pass-2 tables ──
+    // AnnotSV attaches a reference DEL/DUP entry given as FtIncludedInSV only when it lies
+    // inside the called SV, so a precise call slightly inside its published counterpart is
+    // missed. SVINFT_ANNOTATE adds same-type entries from svinft_del_bed/svinft_dup_bed that
+    // the SV covers by at least svinft_min_ref_coverage of their length; the report merges
+    // both before its cleaning step. Skipped, with a warning, when either BED or ensembl_db
+    // is unset or not found: the report then uses AnnotSV's matches alone.
     //
     def svinft_inputs   = [ svinft_del_bed: params.svinft_del_bed, svinft_dup_bed: params.svinft_dup_bed, ensembl_db: params.ensembl_db ]
     def svinft_missing  = svinft_inputs.findAll { _name, p -> !p || !file(p.toString()).exists() }.keySet()
     def ch_sv_pass2_rpt = FILTER_SV.out.tsv_pass2
     if ( svinft_missing ) {
-        log.warn "ST17_SVINFT skipped: ${svinft_missing.join(', ')} unset or not found; the SV report uses AnnotSV's ST17 DEL/DUP matches only."
+        log.warn "SVINFT_ANNOTATE skipped: ${svinft_missing.join(', ')} unset or not found; the SV report uses AnnotSV's DEL/DUP matches only."
     } else {
         // Fail at launch, not after FILTER_SV: the R script re-checks this.
         if ( !(params.svinft_min_ref_coverage?.toString() ==~ /(0?\.[0-9]*[1-9][0-9]*|1(\.0*)?)/) ) {
             error "svinft_min_ref_coverage must be a number in (0, 1], got '${params.svinft_min_ref_coverage}'."
         }
-        ST17_SVINFT(
+        SVINFT_ANNOTATE(
             FILTER_SV.out.tsv_pass2,
             file(params.svinft_del_bed),
             file(params.svinft_dup_bed),
             file(params.ensembl_db),
             params.svinft_min_ref_coverage
         )
-        ch_sv_pass2_rpt = ST17_SVINFT.out.tsv
+        ch_sv_pass2_rpt = SVINFT_ANNOTATE.out.tsv
     }
 
     //
