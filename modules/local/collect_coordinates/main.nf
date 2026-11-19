@@ -9,9 +9,10 @@
 // event before the clusterer ever sees it -- silently defeating the feature. The pad must
 // be >= the clusterer's distance tolerance (params.cohort_sv_max_dist).
 //
-// CONTIG NAMING: the cleaned TSV and the annotated VCFs both use UNPREFIXED contigs
-// ("14", not "chr14"), so no renaming is applied here. Verified 2026-09-17. If the
-// report layer ever starts emitting chr-prefixed CHROM, this module must be revisited.
+// CONTIG NAMING: the cleaned TSV and the annotated VCFs both carry the reference FASTA's
+// contig names (the reheader steps after AnnotSV rename its output back to them; before
+// 2026-11-18 both were unprefixed). The TSV's CHROM comes from those same VCFs, so the
+// BED and the VCFs always agree and no renaming is applied here.
 //
 // BND ROWS: a breakend is a POINT, and its interval must be POS +/- pad -- never POS..END.
 //
@@ -24,10 +25,9 @@
 // At cohort scale this drags unrelated SVs into every such locus and inflates the
 // clusterer's input. Hence the explicit SVTYPE=="BND" guard below.
 //
-// The mate is NOT parsed out of ALT (e.g. "N[chr5:171319244[", where the mate IS
-// chr-prefixed while CHROM is not): each breakend is emitted by the caller as its OWN VCF
-// record with its own CHROM/POS, so it already has its own TSV row and its own interval.
-// Parsing ALT would duplicate intervals and require stripping the inconsistent prefix.
+// The mate is NOT parsed out of ALT (e.g. "N[chr5:171319244["): each breakend is
+// emitted by the caller as its OWN VCF record with its own CHROM/POS, so it already has
+// its own TSV row and its own interval. Parsing ALT would duplicate intervals.
 process COLLECT_COORDINATES {
     tag "${tsv.simpleName}"
     label 'process_single'

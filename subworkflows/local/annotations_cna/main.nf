@@ -27,6 +27,7 @@ workflow ANNOTATIONS_CNA {
     candidate_genes  // val: path or [] — consumed by ADD_CALLER --candidate-genes
     knot_config      // val: path or [] — optional custom config_AnnotSV.yaml
     ch_annotsv_ann   // channel.value([ [:], path(annotations_dir) ]) — staged in main wf
+    ch_fasta_fai     // channel: [ val(meta), path(fai) ] — FASTA index; its contig names are the VCF naming authority
 
     main:
 
@@ -76,8 +77,9 @@ workflow ANNOTATIONS_CNA {
         Channel.value( [ [:], [] ] )    // no gene_transcripts
     )
 
-    // Step 4: restore Wakhan FORMAT headers (AnnotSV/variantconvert strips them).
-    // The original Wakhan VCF is the source for FORMAT header content.
+    // Step 4: restore the Wakhan FORMAT headers AnnotSV strips (copied from the original Wakhan
+    // VCF), and rename contigs to match the reference FASTA: AnnotSV strips "chr" and declares
+    // MT, not M. See the module header.
     ANNOTSV_ANNOTSV.out.vcf
         .join( wakhan_vcf_ch, by: 0 )
         .set { ch_reheader_input }
@@ -86,7 +88,7 @@ workflow ANNOTATIONS_CNA {
     // BCFTOOLS_RENAME_IDS. REHEADER_WAKHAN_FMT needs it to scope the
     // 0↔1 POS-shift sed (workaround for bcftools annotate refusing POS=0
     // — see module header comment) to Wakhan records only.
-    BCFTOOLS_REHEADER_WAKHAN_FMT( ch_reheader_input, id_prefix )
+    BCFTOOLS_REHEADER_WAKHAN_FMT( ch_reheader_input, id_prefix, ch_fasta_fai )
 
     // Normalise ACMG_class + AnnotSV_ranking_score to typed scalars before
     // FILTER_CNA so vembrane, KnotAnnotSV, and the R report all see clean

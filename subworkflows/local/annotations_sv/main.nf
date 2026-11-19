@@ -26,6 +26,7 @@ workflow ANNOTATIONS_SV {
     candidate_genes       // val: path
     knot_config           // val: path or [] — optional custom config_AnnotSV.yaml
     ch_fasta              // channel: [ val(meta), path(fasta) ] — reference FASTA for VEP
+    ch_fasta_fai          // channel: [ val(meta), path(fai) ] — FASTA index; its contig names are the VCF naming authority
     ch_vep_cache          // channel: [ val(meta2), path(cache) ] — VEP cache dir ([] when not used)
     sv_vcf_ch             // Channel.value( list<path> ) — [sv_vcf, sv_vcf_tbi, clinvar, clinvar_tbi] or [] when unused
     vep_extra_files       // val: list<path> — extra files staged for VEP plugins ([] if none)
@@ -86,11 +87,10 @@ workflow ANNOTATIONS_SV {
     //     []            // no bedpe_dbs
     // )
 
-    // Step 5b: inject missing SAVANA FORMAT header definitions (VAF, hVAF, DR, DV).
-    // AnnotSV does not forward FORMAT ##FORMAT lines from its input VCF, so these
-    // fields are present in records but undefined in the header, causing pysam /
-    // vembrane to fail.  bcftools annotate --header-lines is additive (appends only).
-    BCFTOOLS_REHEADER_SAVANA_FMT( ANNOTSV_ANNOTSV.out.vcf )
+    // Step 5b: restore the SAVANA FORMAT header definitions (VAF, hVAF, DR, DV) that AnnotSV
+    // drops (bcftools annotate --header-lines appends only), and rename contigs to match the
+    // reference FASTA: AnnotSV strips "chr" and declares MT, not M. See the module header.
+    BCFTOOLS_REHEADER_SAVANA_FMT( ANNOTSV_ANNOTSV.out.vcf, ch_fasta_fai )
 
     // Step 5c: normalise ACMG_class + AnnotSV_ranking_score to clean scalars
     // (Number=1,Type=Integer / Type=Float). AnnotSV emits ACMG_class as a

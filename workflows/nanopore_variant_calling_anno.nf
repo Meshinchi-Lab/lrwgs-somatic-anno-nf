@@ -216,6 +216,8 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
     def ch_candidate_genes_file = PREPARE_REFERENCES.out.candidate_genes_file
     def candidate_genes         = PREPARE_REFERENCES.out.candidate_genes
     def sv_vcf_ch               = PREPARE_REFERENCES.out.sv_custom_files   // Channel.value( [vcf, tbi, ...] ) or []
+    // [meta, fai]: the contig names of params.fasta, which AnnotSV's VCFs are renamed back to
+    def ch_fai                  = fasta_fai.map { meta, _fa, fai -> [ meta, fai ] }
 
     ANNOTATIONS_SV(
         MINDA_ANNOTATIONS.out.annotated_severus_vcf,
@@ -223,6 +225,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
         candidate_genes,
         params.knot_config ? file(params.knot_config, checkIfExists: true) : [],
         fasta_ch2,
+        ch_fai,
         ch_vep_cache,
         sv_vcf_ch,
         vep_extra_files,
@@ -247,7 +250,8 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
             wakhan_vcf_ch,
             candidate_genes,
             params.knot_config ? file(params.knot_config, checkIfExists: true) : [],
-            ch_annotsv_ann
+            ch_annotsv_ann,
+            ch_fai
         )
 
         FILTER_CNA( ANNOTATIONS_CNA.out.annotsv_vcf, fasta_ch2 )

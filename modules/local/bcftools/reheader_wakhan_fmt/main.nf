@@ -1,11 +1,17 @@
 // modules/local/bcftools/reheader_wakhan_fmt/main.nf
 //
-// Post-AnnotSV cleanup for the Wakhan CNA VCF. Two tasks:
+// Post-AnnotSV cleanup for the Wakhan CNA VCF. Three tasks:
 //   1. Re-inject the Wakhan FORMAT declarations (##FORMAT=<...GT,TCN,CN1,CN2,
 //      CNQ1,CNQ2,COV1,COV2>) that AnnotSV/variantconvert strips during
 //      conversion. bcftools annotate --header-lines is additive — it appends
 //      only, without duplicating existing keys.
-//   2. Repair Wakhan's malformed BPS INFO tag. Wakhan emits:
+//   2. In the same bcftools annotate call, put contig names back on the
+//      reference FASTA's (AnnotSV strips "chr" and declares MT, not M): a
+//      --rename-chrs map and the final ##contig lines from the FASTA's .fai,
+//      plus a ##contig=<ID=M> line so bcftools can read an "M" record before
+//      the rename. A CHROM with no FASTA contig fails the task. Same rules and
+//      rationale as BCFTOOLS_REHEADER_SAVANA_FMT.
+//   3. Repair Wakhan's malformed BPS INFO tag. Wakhan emits:
 //        ##INFO=<ID=BPS,Number=0,Type=String,Description="Breakpoints covering segment">
 //      Number=0 is reserved for Type=Flag per VCF v4.2 §1.4.2, and Wakhan
 //      compounds this by writing the tag inconsistently at the record level:
@@ -60,6 +66,7 @@ process BCFTOOLS_REHEADER_WAKHAN_FMT {
     input:
     tuple val(meta), path(annotsv_vcf), path(original_vcf)
     val   id_prefix                                             // e.g. 'wakhan' — scopes the POS 0↔1 sed pattern to Wakhan record IDs
+    tuple val(meta2), path(fai)                                 // samtools faidx index of params.fasta: the contig-name authority
 
     output:
     tuple val(meta), path("${prefix}.vcf.gz"),         emit: vcf
@@ -74,14 +81,39 @@ process BCFTOOLS_REHEADER_WAKHAN_FMT {
     script:
     prefix = task.ext.prefix ?: "${meta.id}.cna.annotated"
     """
-    # ── Step 1: Re-inject Wakhan FORMAT headers stripped by AnnotSV.
+    # ── Step 1: Re-inject Wakhan FORMAT headers stripped by AnnotSV, and put contig
+    # names back on the reference FASTA's (see module header). ##contig=<ID=M>
+    # declares AnnotSV's mitochondrial CHROM so bcftools can read it before the rename.
     bcftools view -h ${original_vcf} | grep -E '^##FORMAT' > wakhan_fmt_headers.txt
+    echo '##contig=<ID=M>' >> wakhan_fmt_headers.txt
+
+    # Rename map from the FASTA index: each "chr" contig from its bare name (1 -> chr1,
+    # M -> chrM). AnnotSV writes the mitochondrial CHROM as M, so a FASTA whose mitochondrial
+    # contig is MT or chrMT also needs M -> that name.
+    cut -f1 ${fai} | sed -nE 's/^chr(.+)\$/\\1\\tchr\\1/p' > contig_map.tsv
+    mito=\$(cut -f1 ${fai} | grep -m1 -xE '(chr)?(M|MT)' || true)
+    case "\$mito" in MT|chrMT) printf 'M\\t%s\\n' "\$mito" >> contig_map.tsv ;; esac
 
     bcftools annotate \\
         --header-lines wakhan_fmt_headers.txt \\
+        --rename-chrs contig_map.tsv \\
         -Oz \\
-        -o step1.formatfix.vcf.gz \\
+        -o step1.renamed.vcf.gz \\
         ${annotsv_vcf}
+
+    # Unmapped check: every CHROM must now be a FASTA contig (bcftools does not stop on this).
+    unmapped=\$(bcftools query -f '%CHROM\\n' step1.renamed.vcf.gz | LC_ALL=C sort -u \\
+        | { grep -vxF -f <(cut -f1 ${fai}) || [ \$? -eq 1 ]; } | paste -sd, -)
+    if [ -n "\$unmapped" ]; then
+        echo "ERROR: ${annotsv_vcf} has CHROM values with no contig in the reference FASTA index ${fai}: \$unmapped" >&2
+        exit 1
+    fi
+
+    # Header contigs = the FASTA's names, lengths and order (see BCFTOOLS_REHEADER_SAVANA_FMT:
+    # reheader --fai keeps existing contig order, so the contig lines are dropped first).
+    bcftools view -h step1.renamed.vcf.gz | grep -v '^##contig=' > step1_header_no_contigs.txt
+    bcftools reheader -h step1_header_no_contigs.txt -o step1.no_contigs.vcf.gz step1.renamed.vcf.gz
+    bcftools reheader --fai ${fai} -o step1.formatfix.vcf.gz step1.no_contigs.vcf.gz
     bcftools index -t step1.formatfix.vcf.gz
 
     # ── Step 2: Rewrite BPS declaration Number=0,Type=String to Number=.,Type=String.
@@ -135,7 +167,8 @@ EOF
     bcftools index -t ${prefix}.vcf.gz
 
     # ── Cleanup intermediates (retain ${prefix}.bps_source.tsv for auditability).
-    rm -f step1.formatfix.vcf.gz step1.formatfix.vcf.gz.tbi \\
+    rm -f step1.renamed.vcf.gz step1.no_contigs.vcf.gz step1_header_no_contigs.txt \\
+          step1.formatfix.vcf.gz step1.formatfix.vcf.gz.tbi \\
           step2.reheaded.vcf.gz step2.reheaded.vcf.gz.tbi \\
           step2_header.txt step2_header.txt.bak \\
           step4.stripped.vcf.gz step4.stripped.vcf.gz.tbi step4.1pos.vcf \\
