@@ -6,12 +6,12 @@ A Nextflow DSL2 pipeline for merging, annotating, filtering, and prioritising **
 
 Input VCFs are produced upstream by two nf-core-style pipelines that this workflow consumes directly:
 
-- **[KolmogorovLab/Lumos](https://github.com/KolmogorovLab/Lumos)** (run from the [Meshinchi-Lab/Lumos](https://github.com/Meshinchi-Lab/Lumos) fork) — long-read WGS SV calling (Severus), allele-specific copy number calling (Wakhan), and somatic SNV calling (DeepSomatic) from Nanopore BAMs. This cohort is **tumour-only** (no matched normal), so somatic status is not established by subtracting a matched normal; it is inferred downstream from population allele frequency (gnomAD-SV), clinical evidence (ClinVar, AnnotSV ACMG), and single-haplotype read support. That premise is what the SV/CNA/SNV filtering strategy below is built around.
+- **[KolmogorovLab/Lumos](https://github.com/KolmogorovLab/Lumos)** (run from the [Meshinchi-Lab/Lumos](https://github.com/Meshinchi-Lab/Lumos) fork) — long-read WGS SV calling (Severus), allele-specific copy number calling (Wakhan), and somatic SNV calling (DeepSomatic) from Nanopore BAMs. This cohort is **tumour-only** (no matched normal), and default parameters are based on this assumption. 
 - **[epi2me-labs/wf-somatic-variation](https://github.com/epi2me-labs/wf-somatic-variation)** — Oxford Nanopore's end-to-end somatic workflow, providing ClairS-TO SNV calls.
 
 SAVANA structural variants are called within this pipeline, unless precomputed SAVANA VCFs are supplied in the samplesheet `savana_sv` column.
 
-The pipeline then runs three parallel variant-type paths — SV, CNA, SNV — each with its own merge → annotate → filter → prioritise chain that converges on a single cohort-level Quarto report / Interactive dashboard:
+The pipeline then runs three parallel variant-type paths — SV, CNA, SNV — that generates a single cohort-level Quarto report / Interactive dashboard with genomic data visualization:
 
 ![](assets/pipeline_graphic.png)
 
@@ -56,8 +56,9 @@ The `CALLER` field values are:
 1. **Concatenate** annotated Severus VCF + SAVANA-only VCF (`BCFTOOLS_CONCAT`)
 2. **Sort + index** the merged VCF
 3. **AnnotSV** annotation — structural variant annotation with optional user-supplied BED files (FtIncludedInSV / SVincludedInFt / AnyOverlap overlap categories); see [User BED annotations](#user-bed-annotations) below
-4. **KnotAnnotSV** — interactive HTML (or `.xlsm`) report from the AnnotSV TSV output
-5. **ENSEMBLVEP_VEP** (optional) — VEP annotation of the AnnotSV VCF with `--custom` gnomAD SV and ClinVar SV overlaps; requires either a local cache path (`--vep_cache`) or `include_cache = true` to auto-download. Both reference VCFs first pass through **SV_REFERENCE_FILTER_CHECK** (in `PREPARE_REFERENCES`): a FILTER-column census is published to `reference/sv_filter_check/`, and under the default `--sv_reference_filter_policy filter` VEP annotates against the PASS-only subset (gnomAD-SV v4.1 sites ships 955,369 non-PASS records out of 2,154,486; dbVar nstd102 carries no FILTER annotation and is used as-is).
+4. **BCFTOOLS_REHEADER_SAVANA_FMT** — restore the Severus/SAVANA FORMAT definitions AnnotSV drops, and put contig names back on the reference FASTA's, read from its `.fai` (`bcftools annotate --rename-chrs` + `bcftools reheader --fai`). AnnotSV strips `chr` from CHROM and declares an Ensembl-style header (`MT`, not `M`), which broke bcftools on mitochondrial calls and FASTA lookups downstream (Jasmine `--dup_to_ins`). A UCSC-style FASTA gives `chr1`…`chrM`, an Ensembl-style one `1`…`MT`; a CHROM with no FASTA contig stops the run with the names involved
+5. **KnotAnnotSV** — interactive HTML (or `.xlsm`) report from the AnnotSV TSV output
+6. **ENSEMBLVEP_VEP** (optional) — VEP annotation of the AnnotSV VCF with `--custom` gnomAD SV and ClinVar SV overlaps; requires either a local cache path (`--vep_cache`) or `include_cache = true` to auto-download. Both reference VCFs first pass through **SV_REFERENCE_FILTER_CHECK** (in `PREPARE_REFERENCES`): a FILTER-column census is published to `reference/sv_filter_check/`, and under the default `--sv_reference_filter_policy filter` VEP annotates against the PASS-only subset (gnomAD-SV v4.1 sites ships 955,369 non-PASS records out of 2,154,486; dbVar nstd102 carries no FILTER annotation and is used as-is).
 
 ### FILTER_SV
 
@@ -98,7 +99,7 @@ Mirrors ANNOTATIONS_SV for the Wakhan CNV VCF:
 3. `BCFTOOLS_ADD_CALLER_TAG` — tag every record with `INFO/CALLER=WAKHAN` 
 4. `BCFTOOLS_SORT` + `BCFTOOLS_INDEX`
 5. `ANNOTSV_ANNOTSV` — CNV annotation with the same user-BED overlap set as SV (ST19 T-ALL recurrent-CNV BEDs live under `Users/`)
-6. `BCFTOOLS_REHEADER_WAKHAN_FMT` — Fix header and dropped values from AnnotSV via `bcftools query` + `bcftools annotate` with an auditable TSV output. See module header for the full traceable / auditable fix.
+6. `BCFTOOLS_REHEADER_WAKHAN_FMT` — Fix header and dropped values from AnnotSV via `bcftools query` + `bcftools annotate` with an auditable TSV output, and put contig names back on the reference FASTA's as in ANNOTATIONS_SV. See module header for the full traceable / auditable fix.
 7. `BCFTOOLS_CLEAN_ANNOTSV` — normalise `ACMG_class` and `AnnotSV_ranking_score` to typed scalars (AnnotSV emits compound `<split>,full=<full>` encodings that break vembrane)
 8. `KNOTANNOTSV` — interactive HTML + Excel reports, includes all reported variants
 
@@ -165,7 +166,7 @@ Output: bgzipped, tabix-indexed filtered VCF (`*.snv.filtered.vcf.gz`) plus a ve
 
 ### SV_REPORT_INDEX (cohort-level)
 
-Runs in parallel with `FILTER_SV`, `FILTER_CNA`, and `FILTER_SNV`. Collects per-sample outputs from all samples across the cohort and renders a single `index.html` interactive dashboard cohort report using [Quarto](https://quarto.org) (R/`rocker:verse` container).
+Collects per-sample outputs from all samples across the cohort from  `FILTER_SV`, `FILTER_CNA`, and `FILTER_SNV` modules and renders a single `index.html` interactive dashboard cohort report using [Quarto](https://quarto.org) (R/`rocker:verse` container).
 
 Inputs gathered across all samples:
 - AnnotSV annotation TSVs
@@ -173,15 +174,21 @@ Inputs gathered across all samples:
 - VEP summary HTML reports (when VEP is configured)
 - Optional sample metadata CSV (`--sample_metadata`)
 
-The rendered `index.html` provides a cohort-level view of all per-sample KnotAnnotSV and VEP reports in one place, suitable for cohort-level SV review and filtering.
+The rendered `index.html` provides a cohort-level view of all per-sample IGV, KnotAnnotSV, and VEP reports in one place, suitable for cohort-level SV review and filtering.
 
-The report is rendered **twice** when `run_cohort_merge_sv` or `run_genomic_viz` is true (both default true); with neither, pass 1 is the published report. Pass 1 writes the tiered tables (`cohort_sv_pass2.tsv`, `cohort_cna_pass2.tsv`, `cohort_snv.tsv`); `COHORT_MERGE_SV` clusters the tiered SV loci across samples with Jasmine (see `cohort_merge_sv/` below); pass 2 re-renders the same report with the merge staged, so the Overview page gains a **Cohort recurrent SVs (Jasmine merge)** card and the tiered SV table (and the published `cohort_sv_pass2.tsv`) carry five recurrence columns joined by sample and record ID: `cohort_recurrent`, `n_any`, `n_tiered`, `cluster_span`, `cluster_id`. On pass 1 these columns are present but NA.
+If `run_cohort_merge_sv` the same report, the SV page gains a **Cohort recurrent SVs (Jasmine merge)** card and the tiered SV table (and the published `cohort_sv_pass2.tsv`) record five recurrence columns joined by sample and record ID: `cohort_recurrent`, `n_any`, `n_tiered`, `cluster_span`, `cluster_id`.
+
+The current SV report is developed for T-ALL and assumes `SVinFt_DEL` and `SVinFt_DUP` are generated from BEDs are the ST17 DEL/DUP references. SV_REPORT_INDEX merges the two columns into `name_ST17_DEL`/`name_ST17_DUP` and their scores before its ST17 cleaning step, so the type matching, the BND partner check, `ST17_hit` and the driver tier all see one set of matches.
 
 Output: `results/sv_report/index.html`
 
-### GENOMIC_VIZ — cohort circos and oncoprint (standard tools)
+### GENOMIC_VIZ — cohort circos and oncoprint
 
-Runs between the two report passes (`run_genomic_viz`, default true; it forces pass 2 even when the cohort merge is off). Two converters in the `csvtk` container reshape the pass-1 cohort TSVs — no Python or R — into **Circos** text tracks (`<set>.links.txt`, `<set>.cna.txt`, `<set>.labels.txt`) for the cohort and each sample, and into a **MAF** + copy-number table + gene list for **maftools**. `CIRCOS` (bioconda 0.69.9, karyotype shipped in the container, config in `assets/genomic_viz/circos/`) renders PNG + SVG per set; `MAFTOOLS_ONCOPLOT` (Bioconductor 2.26.0) renders the gene × sample oncoprint with SNV classes from VEP consequence (`assets/genomic_viz/vep_consequence_to_maf.tsv`), `SV_*` classes and Amp/Del. Encodings: link colour = `driver_tier`, thickness = cohort `n_any`, Tier-1 gene labels (SV breakpoint genes, copy-number candidate genes, SNV genes); oncoprint rows = candidate-panel genes with a non-synonymous SNV, SV or copy-number alteration plus genes with such an alteration in ≥ 2 samples, capped by `oncoprint_top_genes` (40; checked at launch). Pass 2 shows them on the **Cohort figures** page: the cohort circos and oncoprint embedded with captions that state the encodings and counts, a thumbnail gallery of the per-sample circos, and every intermediate downloadable. The same files are published under `genomic_viz/`. A MAF with no drawable rows, or fewer than two genes, gives an explained empty state instead of an oncoprint.
+Runs when `run_genomic_viz` is set (default true). A `CIRCOS` renders PNG + SVG for the cohort using the Circlize R package. Next, filtered TSV are converted into a **MAF** + copy-number table + gene list for **maftools**, and an oncoprint is generated with  `MAFTOOLS_ONCOPLOT` (Bioconductor 2.26.0) to create a gene × sample oncoprint with SNV classes from VEP consequence. 
+
+`SV_*` classes and Amp/Del. Encodings: link colour = `driver_tier`, thickness = cohort `n_any`, Tier-1 gene labels (SV breakpoint genes, copy-number candidate genes, SNV genes); oncoprint rows = candidate-panel genes with a non-synonymous SNV, SV or copy-number alteration plus genes with such an alteration in ≥ 2 samples, limited by `oncoprint_top_genes` (default 40). 
+
+Figures are included in the **Cohort figures** page: the cohort circos and oncoprint embedded with captions that state the encodings and counts, a thumbnail gallery of the per-sample circos, and every intermediate downloadable. The same files are also published under `genomic_viz/`. 
 
 ---
 
@@ -189,7 +196,7 @@ Runs between the two report passes (`run_genomic_viz`, default true; it forces p
 
 **Filtering strategy and driver-tier scoring**
 
-Every variant type (SV, CNA, SNV): (1) a hard PASS filter at the caller / vembrane step, (2) a soft evidence-tier assignment based on empirical T-ALL recurrence + candidate-gene panel membership + curated pathogenicity, and (3) a per-tier tie-breaker `tier_score` used to rank rows inside each tier. 
+Every variant type (SV, CNA, SNV): (1) a PASS filter at the caller / vembrane step, (2) a soft evidence-tier assignment based on empirical T-ALL recurrence + candidate-gene panel membership + curated pathogenicity, and (3) a per-tier tie-breaker `tier_score` used to rank rows inside each tier. 
 
 Tier 1 variants are included in the interactive DISCO plot and lollipop plots. 
 
@@ -199,15 +206,15 @@ The `ACMG_class` used by the SV and CNA filters and tiers comes from AnnotSV, wh
 
 | Tier | Criterion | `tier_score` tie-breaker |
 |---|---|---|
-| **T1** | Any SVTYPE-matched `name_ST17_*` hit (empirical T-ALL recurrence BED). For DEL and DUP records these include the `SVINFT_ANNOTATE` matches. BND records also gain their intra-chromosomal partner from `name_ST17_DEL` because the ST17 BND BED is by author's definition inter-chromosomal only. Partner chromosome is cross-validated against the ALT bracket notation within a 10 kb tolerance. | max integer score across the SVTYPE-matched `score_ST17_*` an estimate for how many T-ALL samples had this event. |
-| **T2** | No ST17 hit, but ≥ 1 gene in the record's `Gene_name` / `Closest_left` / `Closest_right` overlaps the `--candidateGenesFile` panel. Intergenic BND breakpoints are covered because closest-flanking genes are checked. | count of overlapping candidate genes (breadth of impact). |
-| **T3** | Neither an ST17 hit nor a candidate-gene overlap, but the record survived the pass2 vembrane gate (P_gain/P_loss/P_ins source, RE_gene, ACMG 3–5, ClinVar pathogenic, etc.). | `AnnotSV_ranking_score`. |
+| **T1** | Any SVTYPE-matched `name_ST17_*` hit (empirical T-ALL recurrence BED). For DEL and DUP records these include the `SVINFT_ANNOTATE` matches. Partner chromosome is cross-validated against the ALT bracket notation within a 10 kb tolerance for interchromosomal BND types. | max integer score across the SVTYPE-matched `score_ST17_*` is an estimate for the number many T-ALL samples in the reference with this event. |
+| **T2** | No T-ALL reference hit, but ≥ 1 gene from `Gene_name` / `Closest_left` / `Closest_right` overlaps the `--candidateGenesFile` panel. | count of overlapping candidate genes (breadth of impact). |
+| **T3** | Neither an T-ALL reference hit nor a candidate-gene overlap, but the record has pathogenic evidence (P_gain/P_loss/P_ins source, RE_gene, ACMG 3–5, ClinVar pathogenic). | `AnnotSV_ranking_score`. |
 
 ### Copy-number alterations (CNA)
 
 | Tier | Criterion | `tier_score` tie-breaker |
 |---|---|---|
-| **T1** | Any of the four SVTYPE-matched `name_ST19_Alterations.CNV.Recurrent_*` hits. GAIN records match AMP + GAIN columns; LOSS records match DEL + LOSS columns. | max integer score across the four SVTYPE-matched `score_ST19_*` |
+| **T1** | Any of the four SVTYPE-matched `name_ST19_Alterations.CNV.Recurrent_*` (empirical T-ALL recurrence BED) hits. GAIN records match AMP + GAIN columns; LOSS records match DEL + LOSS columns. | max integer score across the four SVTYPE-matched `score_ST19_*` |
 | **T2** | Same candidate-gene rule as SV. | count of overlapping candidate genes. |
 | **T3** | Passed the FILTER_CNA gate on other evidence (P_gain_source, ACMG 3–5, etc.). | `AnnotSV_ranking_score`. |
 
@@ -215,9 +222,9 @@ The `ACMG_class` used by the SV and CNA filters and tiers comes from AnnotSV, wh
 
 | Tier | Criterion | `tier_score` tie-breaker |
 |---|---|---|
-| **T1** | ClinVar oncogenicity `ONC` field contains "oncogenic" ("Oncogenic" + "Likely_oncogenic") **AND** `SYMBOL` is in the candidate-gene `--candidateGenesFile` panel. | max(`CLAIRSTO_VAF`, `DEEPSOMATIC_VAF`) — higher = stronger somatic call. |
+| **T1** | ClinVar oncogenicity `ONC` field contains "oncogenic" ("Oncogenic" + "Likely_oncogenic") **AND** `SYMBOL` is in the candidate-gene `--candidateGenesFile` panel. | max(`CLAIRSTO_VAF`, `DEEPSOMATIC_VAF`) reports the higher VAF somatic call. |
 | **T2** | ClinVar `CLNSIG` matches "pathogenic" (catches "Pathogenic", "Likely_pathogenic", "Pathogenic_low_penetrance") **OR** `SYMBOL` is in the candidate-gene panel. | same VAF max. |
-| **T3** | Passed the FILTER_SNV gate on other evidence (SIFT deleterious / PolyPhen damaging predictions, etc.). | same VAF max. |
+| **T3** | Has some pathogenicity evidence (SIFT deleterious / PolyPhen damaging predictions). | same VAF max. |
 
 
 ### Custom References 
@@ -242,7 +249,11 @@ User BED files supplied via `--FtIncludedInSV`, `--SVincludedInFt`, or `--AnyOve
 - The module appends the file basename (without `.bed`) to every column name after `#chrom`, producing unique INFO fields per file (e.g. `name_ST17_Alterations.SV.All_DEL`). The filter expression matches these fields with the `name_ST17_*` pattern.
 - The module validates that all `header.tsv` files are non-empty and will exit with a descriptive error if a BED file is missing its header line or uses space delimiters.
 
-**Reference DEL/DUP matches in the SVincludedInFt style (`SVINFT_ANNOTATE`).** AnnotSV attaches an FtIncludedInSV entry only when it lies entirely inside the called SV, so a precise long-read call that sits slightly inside its published counterpart gets no match. For example, a 2.1 kb BCL11B-enhancer tandem duplication falls inside the 2.6 kb ST17 entries for the same event. After FILTER_SV, `SVINFT_ANNOTATE` runs an R script (`bin/svinft_annotate.R`, plyranges, in the `sv_report_index` image) on each pass-2 table, using the reference DEL and DUP BEDs given by `--svinft_del_bed` and `--svinft_dup_bed` (same format as the user BEDs above). For every DEL and DUP record it adds each reference entry of the same type that the SV covers by at least `--svinft_min_ref_coverage` (default 0.5) of the entry's length. The coverage floor stops megabase-scale entries from matching every small SV inside them. The module writes two columns, `SVinFt_DEL` and `SVinFt_DUP`, and leaves every original column unchanged. The EnsDb (`--ensembl_db`) supplies chromosome names and lengths. The step is skipped, with a warning, when either BED or the EnsDb is unset or not found. The augmented tables are published under `filter_sv/svinft/`. The current SV report is built for T-ALL and assumes these BEDs are the ST17 DEL/DUP sets: SV_REPORT_INDEX merges the two columns into `name_ST17_DEL`/`name_ST17_DUP` and their scores before its ST17 cleaning step, so the type matching, the BND partner check, `ST17_hit` and the driver tier all see one set of matches.
+**Reference DEL/DUP matches in the SVincludedInFt method (`SVINFT_ANNOTATE`).** AnnotSV FtIncludedInSV parameter, for example, will identify a 2.1 kb BCL11B-enhancer tandem duplication falls inside the 2.6 kb ST17 entries for the same event. 
+
+After FILTER_SV, `SVINFT_ANNOTATE` uses an R script (`bin/svinft_annotate.R`, plyranges, in the `sv_report_index` image) on the filtered prioritized SVs to compare them again against the reference DEL and DUP BEDs given by `--svinft_del_bed` and `--svinft_dup_bed` (same format as the user BEDs above). Any reference SV that falls within a sample's SV of the same type, covered by at least `--svinft_min_ref_coverage` (default 0.5). The length of coordinates overlap prevents megabase length entries from matching small SV that fall within large events. The module generates two columns, `SVinFt_DEL` and `SVinFt_DUP`, indicating if the reference SV (SV) overlaps in the sample feature (FT) coordinates. The EnsDb (`--ensembl_db`) supplies chromosome names and lengths.
+
+The step is skipped, with a warning, when either BED or the EnsDb is unset or not found. The augmented tables are published under `filter_sv/svinft/`. 
 
 ---
 
@@ -258,19 +269,20 @@ User BED files supplied via `--FtIncludedInSV`, `--SVincludedInFt`, or `--AnyOve
 
 ### Samplesheet
 
-The pipeline takes a CSV samplesheet. Each row is one sample with paths to aligned BAM/CRAM files and pre-called SV/CNV/SNV VCFs:
+The pipeline takes a CSV samplesheet. Each row is one sample with paths to aligned BAM/CRAM files and pre-called SV/CNV/SNV VCFs from the upstream data processing pipelines Lumos and wf-somatic-variation:
 
 ```csv
 id,bam,severus_sv,savana_sv,wahkan_cnv,clairsto_snv,deepsomatic_snv
 SAMPLE_1,/path/to/SAMPLE_1.haplotagged.bam,/path/to/SAMPLE_1.severus_somatic.vcf.gz,,/path/to/SAMPLE_1.wakhan_cna.vcf.gz,/path/to/SAMPLE_1.wf-somatic-snv.vcf.gz,/path/to/SAMPLE_1.deepsomatic.vcf.gz
 ```
 
-`savana_sv` is optional. Leave it empty (as above), write `NA`, or omit the column to have the pipeline run SAVANA. To supply a precomputed call set instead, give the raw SAVANA somatic output, `<sample>.classified.somatic.vcf` (as written by `savana to`)
+`savana_sv` is optional. Leave it empty (as above), write `NA`, or omit the column to have the pipeline run SAVANA. To supply a precomputed call set, provide the SAVANA somatic VCF output, named `<sample>.classified.somatic.vcf` (as written by `savana to`). 
 
 ### Minimal run
 
 ```bash
 nextflow run Meshinchi-Lab/lrwgs-somatic-anno-nf \
+    -r main \
     -profile docker \
     --input samplesheet.csv \
     --outdir results
@@ -280,27 +292,27 @@ nextflow run Meshinchi-Lab/lrwgs-somatic-anno-nf \
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `--input` | `data/2025-07-24-AIEOP-BFM_T-ALL_wgs_nanopore_batches_samplesheet.csv` | Path to samplesheet CSV |
-| `--outdir` | `results/patient_ctrl_samples` | Output directory |
+| `--input` | `data/samplesheet.csv` | Path to samplesheet CSV |
+| `--outdir` | `results/` | Output directory |
 | `--genome` | `GRCh38` | Genome build |
 | `--fasta` | `data/reference/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna` | Path to reference FASTA |
 | `--contigs_file` | SAVANA `contigs.chr.hg38.txt` (GitHub URL) | Chromosome contig list for SAVANA |
 | `--pon_1kg` | `1000g_hg38` | SAVANA panel-of-normals identifier |
-| `--sv_merge_size` | `100` | Size threshold for SV merging |
+| `--sv_merge_size` | `100` | Size threshold in base pairs for SV merging across Severus and SAVANA |
 | `--annotsv_annotations` | `data/reference/AnnotSV` | Path to pre-built AnnotSV database (null = auto-download) |
-| `--candidateGenesFile` | `data/reference/genomic_basis_tall/ST9.alterations_OncoKB_cancer_genes.txt` | Gene list for AnnotSV candidate gene annotation |
-| `--FtIncludedInSV` | `ST17_Alterations.SV.All_{DEL,DUP,INS,INV}.bed` in `data/reference/genomic_basis_tall/` | BED files for AnnotSV FtIncludedInSV user annotations |
+| `--candidateGenesFile` | `data/reference/custom/cancer_genes.txt` | Gene list for AnnotSV candidate gene annotation and used in the SV HTML Report for driver tier classification. A list of genes known to be altered in a specific cancer and/or pan-cancer associated genes |
+| `--FtIncludedInSV` | `*{DEL,DUP,INS,INV}.bed` in `data/reference/custom/` | BED files for AnnotSV FtIncludedInSV user annotations |
 | `--SVincludedInFt` | `[]` | BED files for AnnotSV SVincludedInFt user annotations |
-| `--AnyOverlap` | `data/reference/genomic_basis_tall/ST17_Alterations.SV.All_BND.bed` | BED files for AnnotSV AnyOverlap user annotations |
-| `--svinft_del_bed`, `--svinft_dup_bed` | `ST17_Alterations.SV.All_{DEL,DUP}.bed` in `data/reference/genomic_basis_tall/` | Reference DEL and DUP BEDs for `SVINFT_ANNOTATE`; unset either one to skip the step |
+| `--AnyOverlap` | `data/reference/custom/*BND.bed` | BED files for AnnotSV AnyOverlap user annotations |
+| `--svinft_del_bed`, `--svinft_dup_bed` | `*_{DEL,DUP}.bed` in `data/reference/custom/` | Reference DEL and DUP BEDs for `SVINFT_ANNOTATE`; unset either one to skip the step |
 | `--svinft_min_ref_coverage` | `0.5` | Fraction of a reference entry's length a DEL/DUP must cover to match it in `SVINFT_ANNOTATE`, in (0, 1] |
-| `--sample_metadata` | `data/2025-07-24-AIEOP-BFM_T-ALL_wgs_nanopore_wf_metadata.csv` | CSV with cohort-level sample metadata for the `SV_REPORT_INDEX` Quarto report |
+| `--sample_metadata` | `data/*_wgs_nanopore_wf_metadata.csv` | CSV with cohort-level sample metadata for the `SV_REPORT_INDEX` Quarto report |
 | `--knot_config` | `./config_AnnotSV.yaml` | Custom KnotAnnotSV config YAML |
 | `--vep_cache` | `data/vep` | Path to pre-built VEP cache (null = skips VEP unless `sv_vcf`/`sv_clinvar` set) |
 | `--include_cache` | `false` | Auto-download VEP cache when `vep_cache` is null |
 | `--sv_vcf` | `data/gnomad_sv_cnv/gnomad.v4.1.sv.sites.vcf.gz` | gnomAD SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
 | `--sv_clinvar` | `data/clinvar/nstd102.GRCh38.variant_call.vcf.gz` | ClinVar SV VCF for VEP `--custom` annotation (must be bgzipped + tabix-indexed) |
-| `--sv_reference_filter_policy` | `filter` | What to do when `sv_vcf` / `sv_clinvar` contain non-PASS or REMOVE-labelled records: `filter` (annotate against the PASS-only subset), `fail` (abort), `warn` (report only, use as supplied). A per-file census is always written to `reference/sv_filter_check/` |
+| `--sv_reference_filter_policy` | `filter` | What to do when `sv_vcf` / `sv_clinvar` contain non-PASS records: `filter` (annotate against the PASS-only subset), `fail` (abort), `warn` (report only, use as supplied). A per-file census is always written to `reference/sv_filter_check/` |
 | `--species` | `homo_sapiens` | VEP species |
 | `--cache_version` | `115` | VEP cache version |
 
@@ -314,13 +326,10 @@ Reference data comes from two places:
 
 | Kind | Examples | How to get it |
 |---|---|---|
-| **In the Zenodo archive** | GRCh38 FASTA, gnomAD SV + CNV, ClinVar SV + SNV, EnsDb, CIViC, UCSC chain + cytoband, SAVANA contigs, **and** the project-specific ST9/ST16/ST17/ST19 BEDs, curated gene lists and `config_AnnotSV.yaml` | One download — see [Zenodo archive](#zenodo-archive--recommended-starting-point) |
+| **In the Zenodo archive** | GRCh38 FASTA, gnomAD SV + CNV, ClinVar SV + SNV, EnsDb, CIViC, UCSC chain + cytoband, SAVANA contigs, **and** the project-specific user BEDs, curated gene list and `config_AnnotSV.yaml` | One download — see [Zenodo archive](#zenodo-archive--recommended-starting-point) |
 | **Auto-downloadable** | VEP cache, AnnotSV annotations | The pipeline fetches them (see below), or download manually if the network blocks it. Too large for the standard archive |
 
-Between them these cover everything. The archive is the recommended starting
-point: one download, then let the pipeline fetch VEP and AnnotSV (or stage those
-manually). Individual download commands are given below if you prefer to fetch
-files yourself or need to update a release version.
+Between them these cover everything. The archive is the recommended starting point: one download, then the pipeline will fetch VEP and AnnotSV (or stage those manually). Individual download commands are provided if pipeline is unable to retrieve the VEP or AnnotSV references.
 
 Every file, its expected path, and its source URL are listed in [`assets/reference_files_manifest.tsv`](assets/reference_files_manifest.tsv). All paths below are relative to the repository root and match the defaults in `nextflow.config`.
 
@@ -340,12 +349,7 @@ Two references can be fetched by the pipeline itself:
 > `ftp_proxy` and `no_proxy`; it is threaded in as `--env-file` for every process
 > that reaches the network (`ENSEMBLVEP_DOWNLOAD`, `ANNOTSV_INSTALLANNOTATIONS`,
 > `ANNOTSV_SETUPUSERANNO`, `ANNOTSV_ANNOTSV`, `ENSEMBLVEP_VEP_SNV`, `IGVREPORTS`).
-> Note this parameter is set globally, not only under the `OPBG` profile.
->
-> If downloads still time out, fetch the two large references manually
-> (next section) and point the pipeline at the resulting directories. That is
-> also the faster option on any cluster where compute nodes have no outbound
-> access — stage the data from a login node instead.
+
 
 ### VEP cache and AnnotSV — manual download
 
@@ -369,14 +373,11 @@ ln -s "$PWD/AnnotSV/share/AnnotSV" data/reference/AnnotSV
 # then run with: --annotsv_annotations data/reference/AnnotSV
 ```
 
-> `data/reference/AnnotSV` may be a **symlink**. That is fine for local runs, but
-> `bin/make_reference_archive.sh` dereferences it (`tar -h`) so the real contents
-> travel to other machines.
+> `data/reference/AnnotSV` may be a **symlink**.
 
-### Everything else — public downloads
+### Additional public downloads
 
-One block; each `wget` is independent, so comment out anything already present or
-bump a version where noted. Run from the repository root.
+Run from the repository root.
 
 ```bash
 mkdir -p data/reference data/clinvar data/gnomad_sv_cnv
@@ -418,13 +419,9 @@ wget -O data/reference/cytoBandIdeo.hg38.txt.gz https://hgdownload.soe.ucsc.edu/
 wget -P data/reference https://raw.githubusercontent.com/cortes-ciriano-lab/savana/refs/heads/main/example/contigs.chr.hg38.txt
 ```
 
-`EnsDb.Hsapiens.v110.sqlite` (optional, `--ensembl_db`) is not a plain download —
-it comes from Bioconductor AnnotationHub (record `AH113665`) via `ensembldb`.
+`EnsDb.Hsapiens.v110.sqlite` (optional, `--ensembl_db`) is not a plain download. It can be generated with Bioconductor AnnotationHub (record `AH113665`) via `ensembldb`.
 
-### Zenodo archive — recommended starting point
-
-One archive, built with `--tier curated`, carrying everything except the VEP
-cache and AnnotSV annotations — 17 entries, ~5.2 GB extracted:
+### Zenodo archive — recommended
 
 | Contents | |
 |---|---|
@@ -433,13 +430,10 @@ cache and AnnotSV annotations — 17 entries, ~5.2 GB extracted:
 | `data/clinvar/` — ClinVar SNV + dbVar nstd102 SV (+ `.tbi`) | 188 MB |
 | `data/reference/EnsDb.Hsapiens.v110.sqlite` | 432 MB |
 | `data/reference/` — CIViC release, UCSC chain + cytoband, SAVANA contigs | ~400 KB |
-| `data/reference/genomic_basis_tall/` — ST9/ST16/ST17/ST19 BEDs, OncoKB gene list | 1.4 MB |
+| `data/reference/genomic_basis_tall/` — ST16/ST17/ST19 BEDs, ST9 gene list | 1.4 MB |
 | `data/reference/HGNC_TCR_genes.tsv`, `config_AnnotSV.yaml` | 64 KB |
 
-The last three rows are the reason the record exists: they are **derived from
-published supplementary tables** (Pölönen et al., *Nature* 632:1082, 2024) and
-from curated lists, so they cannot be re-downloaded from any URL. `data/` is
-gitignored, so the archive is their only distribution channel.
+The genomic_basis_tall: are **derived from published supplementary tables** (Pölönen et al., *Nature* 632:1082, 2024) and from curated lists, so they cannot be re-downloaded from any URL. 
 
 ```bash
 # download the archive from the Zenodo record, then, from the repository root:
@@ -447,22 +441,13 @@ shasum -a 256 -c SHA256SUMS.curated.*.txt
 tar -xzf tall_wgs_refs.curated.<date>.tar.gz
 ```
 
-The archive stores **repository-relative paths**, so extracting at the repo root
-places every file exactly where `nextflow.config` expects it. Afterwards only the
-VEP cache and AnnotSV annotations remain — let the pipeline fetch them, or stage
-them manually as described above.
-
-To rebuild or refresh it, use
-[`bin/make_reference_archive.sh`](bin/make_reference_archive.sh):
+To rebuild or refresh it, use [`bin/make_reference_archive.sh`](bin/make_reference_archive.sh). The archive stores **repository-relative paths**, so extracting at the repo root places every file exactly where `nextflow.config` expects it after a user creates the references the first time. 
 
 ```bash
 bin/make_reference_archive.sh                        # curated tier (default), ~5.2 GB
 bin/make_reference_archive.sh --tier curated --dry-run   # list members + sizes only
 bin/make_reference_archive.sh --tier bulk            # ~61 GB, adds VEP + AnnotSV
 ```
-
-Output lands in `data/zenodo/` by default — under `data/`, which is gitignored, so
-a multi-GB archive cannot be committed by accident.
 
 `--tier bulk` produces a fully self-contained copy including the VEP cache and
 AnnotSV annotations. At ~61 GB it exceeds Zenodo's **50 GB** per-record cap, so it

@@ -11,12 +11,14 @@ There is no ACMG guideline for structural variants in general. ACMG covers them 
 
 ## Relevance to the annotation pipeline
 
-The SV/CNA filter and Tier 3 use AnnotSV's `ACMG_class`. That class applies Riggs 2020, the germline dosage-pathogenicity framework [5].
+The SV/CNA filter and Tier 3 use AnnotSV's `ACMG_class`. That class applies Riggs 2020, the germline dosage-pathogenicity framework [5]. AnnotSV was assessed for it's ability to identify true positive somatic SVs in Liu et al. and was shown to have reliable identification of known somatic variants [6]. 
+
 
 For the tumor-only somatic calls in this cohort:
 
 - cite Mikhail 2019 [3] as the somatic standard;
 - describe the AnnotSV `ACMG_class` as a pathogenicity score, not an ACMG somatic tier.
+
 
 ## References
 
@@ -25,3 +27,4 @@ For the tumor-only somatic calls in this cohort:
 3. Mikhail FM, Biegel JA, Cooley LD, et al. Technical laboratory standards for interpretation and reporting of acquired copy-number abnormalities and copy-neutral loss of heterozygosity in neoplasia. *Genet Med*. 2019;21(9):1903–1916. doi:[10.1038/s41436-019-0545-7](https://doi.org/10.1038/s41436-019-0545-7)
 4. Li MM, Datto M, Duncavage EJ, et al. Standards and guidelines for the interpretation and reporting of sequence variants in cancer: a joint consensus recommendation of the Association for Molecular Pathology, American Society of Clinical Oncology, and College of American Pathologists. *J Mol Diagn*. 2017;19(1):4–23. doi:[10.1016/j.jmoldx.2016.10.002](https://doi.org/10.1016/j.jmoldx.2016.10.002)
 5. AnnotSV SV ranking and classification documentation (adaptation of Riggs et al. 2020): <https://lbgi.fr/AnnotSV/ranking>
+6. Liu X, Gu L, Hao C, Xu W, Leng F, Zhang P, Li W. Systematic assessment of structural variant annotation tools for genomic interpretation. Life Sci Alliance. 2024 Dec 10;8(3):e202402949. doi: [10.26508/lsa.202402949](https://doi.org/10.1016/j.jmoldx.2016.10.002). PMID: 39658089; PMCID: PMC11632063.
