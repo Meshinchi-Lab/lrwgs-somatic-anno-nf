@@ -266,13 +266,14 @@ workflow FILTER_SV {
 
     VEMBRANE_FILTER_PASS2( BCFTOOLS_VIEW_PASS1.out.vcf, pass2_expr )
 
-    // BND rescue for pass 2 searches the pass 1 bgzipped output for orphaned mates.
+    // BND rescue for pass 2 searches the pass 1 bgzipped output for orphaned mates;
+    // the sort reads the rescue output, as in pass 1.
     VEMBRANE_FILTER_PASS2.out.vcf
         .join( BCFTOOLS_VIEW_PASS1.out.vcf, by: 0 )
         .set { ch_rescue_pass2 }
 
     BCFTOOLS_RESCUE_BND_PASS2( ch_rescue_pass2 )
-    BCFTOOLS_SORT_PASS2( VEMBRANE_FILTER_PASS2.out.vcf )
+    BCFTOOLS_SORT_PASS2( BCFTOOLS_RESCUE_BND_PASS2.out.vcf )
 
     BCFTOOLS_SORT_PASS2.out.vcf
         .map { meta, vcf -> [ meta, vcf, [] ] }

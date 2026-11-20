@@ -55,7 +55,7 @@ The `CALLER` field values are:
 
 1. **Concatenate** annotated Severus VCF + SAVANA-only VCF (`BCFTOOLS_CONCAT`)
 2. **Sort + index** the merged VCF
-3. **AnnotSV** annotation — structural variant annotation with optional user-supplied BED files (FtIncludedInSV / SVincludedInFt / AnyOverlap overlap categories); see [User BED annotations](#user-bed-annotations) below
+3. **AnnotSV** annotation — structural variant annotation with optional user-supplied BED files (FtIncludedInSV / SVincludedInFt / AnyOverlap overlap categories); see [User BED annotations](#user-bed-annotations) below. AnnotSV keeps one record of a same-chromosome BND pair: it annotates the first mate as a spanning SV and writes the other to `*.unannotated.tsv` as a "reciprocal breakend". The kept record's ALT names both breakpoints, and the report, circos and oncoprint inputs read the partner from it
 4. **BCFTOOLS_REHEADER_SAVANA_FMT** — restore the Severus/SAVANA FORMAT definitions AnnotSV drops, and put contig names back on the reference FASTA's, read from its `.fai` (`bcftools annotate --rename-chrs` + `bcftools reheader --fai`). AnnotSV strips `chr` from CHROM and declares an Ensembl-style header (`MT`, not `M`), which broke bcftools on mitochondrial calls and FASTA lookups downstream (Jasmine `--dup_to_ins`). A UCSC-style FASTA gives `chr1`…`chrM`, an Ensembl-style one `1`…`MT`; a CHROM with no FASTA contig stops the run with the names involved
 5. **KnotAnnotSV** — interactive HTML (or `.xlsm`) report from the AnnotSV TSV output
 6. **ENSEMBLVEP_VEP** (optional) — VEP annotation of the AnnotSV VCF with `--custom` gnomAD SV and ClinVar SV overlaps; requires either a local cache path (`--vep_cache`) or `include_cache = true` to auto-download. Both reference VCFs first pass through **SV_REFERENCE_FILTER_CHECK** (in `PREPARE_REFERENCES`): a FILTER-column census is published to `reference/sv_filter_check/`, and under the default `--sv_reference_filter_policy filter` VEP annotates against the PASS-only subset (gnomAD-SV v4.1 sites ships 955,369 non-PASS records out of 2,154,486; dbVar nstd102 carries no FILTER annotation and is used as-is).
@@ -86,6 +86,7 @@ Applies a clinical relevance filter to the VEP-annotated VCF (or the AnnotSV VCF
 Additional per-record refinements: 
  * hVAF haplotype-imbalance filter
  * Tier-3 MINDA-only rescue (T3 records must have consensus support unless they overlap an ST17 BED region). 
+ * BND mate rescue: after each pass, `BCFTOOLS_RESCUE_BND` adds back a breakend that failed while its mate (`INFO/MATE_ID`) passed, so a translocation keeps both records; pass 2 takes it from the pass-1 VCF. Same-chromosome pairs arrive as one record (see ANNOTATIONS_SV step 3).
  * When VEP is not configured the gnomAD and ClinVar checks are omitted and vembrane filters on AnnotSV INFO fields only.
 
 Output: bgzipped, tabix-indexed filtered VCF (`*.merged.annotated.filtered.pass2.vcf.gz`) plus a vembrane-derived TSV table.

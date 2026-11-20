@@ -31,10 +31,11 @@ nextflow_process {
             assert rows.count { it[6] == 'SV_BND' && it[7] == 'SV' } == 5
             assert rows.find { it[0] == 'PCBP3' }[6..7] == ['SV_DEL', 'DEL']
             assert rows.find { it[0] == 'PCBP3' }[1..3] == ['chr21', '45000000', '45015802']
-            // BND3978 is kept from its _2 mate: left gene at that locus, right gene AT THE PARTNER locus
-            assert rows.find { it[0] == 'AFF3' }[1..4] == ['chr2', '99727265', '99727265', 'T']
-            assert rows.find { it[0] == 'RUNX1' && it[8] == 'colo829' }[1..4] == ['chr21', '34816131', '34816131', 'N']
-            assert rows.find { it[0] == 'TLX3' }[1..4] == ['chr5', '171274715', '171274715', 'N']
+            // BND3978 is a complete pair listed _2 first: each mate writes its own gene with its own REF/ALT
+            assert rows.find { it[0] == 'AFF3' }[1..5] == ['chr2', '99727265', '99727265', 'T', '[chr21:34816131[N']
+            assert rows.find { it[0] == 'RUNX1' && it[8] == 'colo829' }[1..5] == ['chr21', '34816131', '34816131', 'A', '[chr2:99727265[N']
+            // BND3977_1 has no mate: TLX3 at the partner locus, REF N, ALT mirrored to point back at chr21:34797509
+            assert rows.find { it[0] == 'TLX3' }[1..5] == ['chr5', '171274715', '171274715', 'N', ']chr21:34797509]N']
             assert rows.find { it[0] == 'TMPRSS15' }[6..7] == ['Nonsense_Mutation', 'SNP']
             assert rows.find { it[0] == 'NOTCH1' }[6..7]   == ['Missense_Mutation', 'SNP']
             // MAF indel convention: anchor base dropped, deletion starts one base after POS
@@ -46,7 +47,7 @@ nextflow_process {
             assert keys.size() == keys.toSet().size()
             def mc = file(process.out.counts[0][1]).readLines()
             assert mc.contains('maf_rows_snv\t3') && mc.contains('maf_rows_sv\t6') && mc.contains('cn_conflicts\t0')
-            assert mc.contains('skipped_sv_duplicate_mates\t2') && mc.contains('skipped_cna_unknown_type\t1') && mc.contains('skipped_snv_no_symbol\t1')
+            assert mc.contains('skipped_sv_duplicate_mates\t0') && mc.contains('skipped_cna_unknown_type\t1') && mc.contains('skipped_snv_no_symbol\t1')
             assert mc.contains('class_SV_BND\t5') && mc.contains('class_Nonsense_Mutation\t1')
             assert mc.contains('oncoprint_genes_eligible\t11') && mc.contains('oncoprint_genes_cap\t5')   // 11 qualify, 5 shown
 
@@ -116,7 +117,7 @@ nextflow_process {
             assert rows.find { it[0] == 'GENEL' }[6] == 'Splice_Region'
             assert rows.find { it[0] == 'GENEM' }[6] == 'Intron'
             assert rows.find { it[0] == 'GENEA' }[1..4] == ['chr1', '1000', '1000', 'N']        // tra -> BND, left gene
-            assert rows.find { it[0] == 'GENEB' }[1..4] == ['chr2', '2000', '2000', 'N']        // right gene at the partner locus
+            assert rows.find { it[0] == 'GENEB' }[1..5] == ['chr2', '2000', '2000', 'N', ']chr1:1000]N']   // the _2 mate's own row and ALT
             assert rows.count { it[0] == 'GENEC' } == 1                                          // intragenic BND: one row
             assert rows.count { it[0] == 'GENEX' } == 1 && rows.count { it[0] == 'GENEY' } == 1  // in-record dedupe
             assert rows.find { it[0] == 'GENEX' }[6..7] == ['SV_DUP', 'SV']
@@ -128,8 +129,78 @@ nextflow_process {
             assert file(process.out.unmapped[0][1]).readLines() == ['vep_term\tn_rows', '(empty)\t1']
             def mc = file(process.out.counts[0][1]).readLines()
             assert mc.contains('cn_conflicts\t1') && mc.contains('skipped_bad_coordinate\t2') && mc.contains('skipped_no_sample\t1')
-            assert mc.contains('skipped_sv_duplicate_mates\t1') && mc.contains('class_SV_DUP\t2') && mc.contains('class_Intron\t1')
+            assert mc.contains('skipped_sv_duplicate_mates\t0') && mc.contains('class_SV_DUP\t2') && mc.contains('class_Intron\t1')
             assert mc.contains('oncoprint_genes_eligible\t3') && mc.contains('oncoprint_genes_cap\t2')
+        }
+    }
+
+    test("bnd pairs - each mate its own row, intragenic pair once, unpaired partner row with the mirrored ALT") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/c2m_mates.sv.tsv", checkIfExists: true) ]
+                input[1] = []
+                input[2] = []
+                input[3] = []
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 40
+                """
+            }
+        }
+        then {
+            assert process.success
+            def rows = file(process.out.maf[0][1]).readLines().findAll { !it.startsWith('#') }.drop(1).collect { it.split('\t') }
+            assert rows.collect { it[0..5].join(' ') }.sort() == [
+                'GENEA chr1 100 100 A A[chr2:200[',          // m_p: each mate writes its own gene, REF and ALT
+                'GENEB chr2 200 200 C ]chr1:100]C',
+                'GENEC chr3 300 300 G G[chr3:900[',          // m_i: intragenic pair, one row
+                'GENED chr4 400 400 A A[chr5:500[',          // unpaired records: own row + partner row
+                'GENEE chr5 500 500 N ]chr4:400]N',          //   t[p[ -> ]c:p]N
+                'GENEF chr6 600 600 A A]chr7:700]',
+                'GENEG chr7 700 700 N N]chr6:600]',          //   t]p] -> N]c:p]
+                'GENEH chr8 800 800 A ]chr9:900]A',
+                'GENEI chr9 900 900 N N[chr8:800[',          //   ]p]t -> N[c:p[
+                'GENEJ chr10 1000 1000 A [chr11:1100[A',
+                'GENEK chr11 1100 1100 N [chr10:1000[N' ]    //   [p[t -> [c:p[N
+            // no ALT names its own row's locus
+            assert rows.every { !it[5].contains(it[1] + ':' + it[2] + '[') && !it[5].contains(it[1] + ':' + it[2] + ']') }
+            def mc = file(process.out.counts[0][1]).readLines()
+            assert mc.contains('maf_rows_sv\t11') && mc.contains('skipped_sv_duplicate_mates\t1') && mc.contains('skipped_bad_coordinate\t0')
+        }
+    }
+
+    test("bnd pairs - reversed rows give the same MAF rows and counts") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/genomic_viz"
+                input[0] = [ [ id: 'cohort' ], file("\${fx}/c2m_mates_rev.sv.tsv", checkIfExists: true) ]
+                input[1] = []
+                input[2] = []
+                input[3] = []
+                input[4] = file("\${projectDir}/assets/genomic_viz/vep_consequence_to_maf.tsv", checkIfExists: true)
+                input[5] = 40
+                """
+            }
+        }
+        then {
+            assert process.success
+            def rows = file(process.out.maf[0][1]).readLines().findAll { !it.startsWith('#') }.drop(1).collect { it.split('\t') }
+            assert rows.collect { it[0..5].join(' ') }.sort() == [
+                'GENEA chr1 100 100 A A[chr2:200[',
+                'GENEB chr2 200 200 C ]chr1:100]C',
+                'GENEC chr3 300 300 G G[chr3:900[',
+                'GENED chr4 400 400 A A[chr5:500[',
+                'GENEE chr5 500 500 N ]chr4:400]N',
+                'GENEF chr6 600 600 A A]chr7:700]',
+                'GENEG chr7 700 700 N N]chr6:600]',
+                'GENEH chr8 800 800 A ]chr9:900]A',
+                'GENEI chr9 900 900 N N[chr8:800[',
+                'GENEJ chr10 1000 1000 A [chr11:1100[A',
+                'GENEK chr11 1100 1100 N [chr10:1000[N' ]
+            def mc = file(process.out.counts[0][1]).readLines()
+            assert mc.contains('maf_rows_sv\t11') && mc.contains('skipped_sv_duplicate_mates\t1') && mc.contains('skipped_bad_coordinate\t0')
         }
     }
 

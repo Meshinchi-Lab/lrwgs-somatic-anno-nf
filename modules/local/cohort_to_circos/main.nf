@@ -4,11 +4,15 @@
 // columns; the fixtures have 18), awk does the relational work. No Python/R.
 //
 // Encodings (spec 6.1):
-//   links   : one line per SV; BND mates collapsed on SAMPLE + ID minus _1/_2; INS skipped;
+//   links   : one line per SV; INS skipped. A BND pair (SAMPLE + ID minus _1/_2) is drawn
+//             once, from its _1 record, or from the _2 record when _1 is absent or cannot be
+//             drawn (bad breakpoint, off-karyotype). The SV projection is read twice so the
+//             record drawn, the link direction and the counts do not depend on row order.
+//             Colour, z and the Tier-1 label gate use the pair's best (lowest) driver_tier over the mates present.
 //             colour = tier<k>; thickness from n_any (1->2p, 2->4p, 3-4->6p, >=5->8p;
 //             SV absent from the map, or no map -> 3p); z = 4 - tier so Tier 1 draws on top.
 //             for a BND the larger n_any of its two mates is used (Jasmine clusters each
-//             mate separately), so thickness does not depend on which mate is listed first.
+//             mate separately), so thickness does not depend on which mate is drawn.
 //   cna     : tiles coloured gain|loss from WAKHAN_TYPE (GAIN/AMP, LOSS/DEL).
 //   labels  : Tier-1 gene names -- SV breakend genes with gene_source == overlap
 //             (fallback: first Gene_name_display token), CNA Candidate_genes at the
@@ -106,7 +110,7 @@ process COHORT_TO_CIRCOS {
         : > "\${s}.links.txt"; : > "\${s}.cna.txt"; : > "\${s}.labels.txt"
     done
 
-    # ---- 4. One awk pass over the four projections ----------------------------------
+    # ---- 4. One awk call over the projections (the SV one is read twice) -------------
     awk -F'\\t' -v OFS='\\t' \\
         -v recf=rec.proj.tsv -v svf=sv.proj.tsv -v cnaf=cna.proj.tsv -v snvf=snv.proj.tsv '
         function san(s)  { gsub(/[^A-Za-z0-9._-]/, "_", s); return s }
@@ -115,6 +119,23 @@ process COHORT_TO_CIRCOS {
         function isnum(x){ return (x ~ /^[0-9]+\$/) }
         function thick(n){ if (n == "") return 3; n = n + 0; if (n <= 1) return 2; if (n == 2) return 4; if (n <= 4) return 6; return 8 }
         function tierof(t){ t = t + 0; if (t < 1 || t > 3) return 3; return t }
+        # Breakpoints of an SV record into c1 p1 c2 p2. Returns "" when the record can be
+        # drawn, "bad" for an unparseable or non-numeric breakpoint, "off" off-karyotype.
+        function geom(st, bpt, chrom, pos, endp,    n, bp, a, b, t) {
+            if (st == "BND") {
+                n = split(bpt, bp, "|")
+                if (n != 2) return "bad"
+                split(bp[1], a, ":"); split(bp[2], b, ":")
+                c1 = norm(a[1]); p1 = a[2]; c2 = norm(b[1]); p2 = b[2]
+            } else {
+                c1 = norm(chrom); p1 = pos; c2 = c1; p2 = endp
+            }
+            if (!isnum(p1) || !isnum(p2)) return "bad"
+            p1 = p1 + 0; p2 = p2 + 0
+            if (st != "BND" && p2 < p1) { t = p1; p1 = p2; p2 = t }
+            if (!ok(c1) || !ok(c2)) return "off"
+            return ""
+        }
         function label(set, chr, pos, gene) {
             if (gene == "" || gene == "NA" || gene == ".") return
             k = set SUBSEP gene SUBSEP chr SUBSEP int(pos / 1000000)
@@ -138,28 +159,30 @@ process COHORT_TO_CIRCOS {
 
         # SV projection: 1 SAMPLE 2 ID 3 CHROM 4 POS 5 END 6 SVTYPE 7 breakpoint 8 tier
         #                9 Gene_name_display 10 gene_left 11 gene_right 12 src_left 13 src_right
+        # Read twice: the first read records the BND pairs whose _1 record can be drawn, and each pair best tier.
+        FILENAME == svf && FNR == 1 { svpass++; next }
+        FILENAME == svf && svpass == 1 {
+            if (\$1 == "" || \$2 !~ /_[12]\$/) next
+            st = toupper(\$6); if (st == "TRA") st = "BND"
+            if (st != "BND") next
+            stem = \$2; sub(/_[12]\$/, "", stem); pk = san(\$1) SUBSEP stem
+            pt = tierof(\$8); if (!(pk in ptier) || pt < ptier[pk]) ptier[pk] = pt
+            if (\$2 ~ /_1\$/ && geom(st, \$7, \$3, \$4, \$5) == "") draw1[pk] = 1
+            next
+        }
         FILENAME == svf {
-            if (FNR == 1) next
             if (\$1 == "") { nosample++; next }
             ss = san(\$1); sets[ss] = 1
             st = toupper(\$6); if (st == "TRA") st = "BND"      # same normalisation as COHORT_TO_MAF
             if (st == "INS") { skip_ins[ss]++; next }
             key = \$2; if (st == "BND") sub(/_[12]\$/, "", key); key = ss SUBSEP key
+            if (st == "BND" && \$2 ~ /_2\$/ && (key in draw1)) { dup[ss]++; next }   # its _1 is drawn
+            gs = geom(st, \$7, \$3, \$4, \$5)
+            if (gs == "bad") { badbp[ss]++; next }
+            if (gs == "off") { offkar[ss]++; next }
             if (key in seen) { dup[ss]++; next }
-            if (st == "BND") {
-                n = split(\$7, bp, "|")
-                if (n != 2) { badbp[ss]++; next }
-                split(bp[1], a, ":"); split(bp[2], b, ":")
-                c1 = norm(a[1]); p1 = a[2]; c2 = norm(b[1]); p2 = b[2]
-            } else {
-                c1 = norm(\$3); p1 = \$4; c2 = c1; p2 = \$5
-            }
-            if (!isnum(p1) || !isnum(p2)) { badbp[ss]++; next }
-            p1 = p1 + 0; p2 = p2 + 0
-            if (st != "BND" && p2 < p1) { t = p1; p1 = p2; p2 = t }
-            if (!ok(c1) || !ok(c2)) { offkar[ss]++; next }
-            seen[key] = 1                              # only a DRAWN record blocks its mate
-            tier = tierof(\$8)
+            seen[key] = 1
+            tier = (st == "BND" && (key in ptier)) ? ptier[key] : tierof(\$8)
             rec = \$1 "_" \$2; stem = rec; if (st == "BND") sub(/_[12]\$/, "", stem)
             w = thick((st == "BND" && (stem in nmax)) ? nmax[stem] : ((rec in nany) ? nany[rec] : ""))
             line = sprintf("hs%s %d %d hs%s %d %d color=tier%d,thickness=%dp,z=%d", c1, p1, p1, c2, p2, p2, tier, w, 4 - tier)
@@ -223,7 +246,7 @@ process COHORT_TO_CIRCOS {
             printf("INFO: cohort links=%d tiles=%d labels=%d; skipped INS=%d, duplicate mates=%d, off-karyotype=%d, bad breakpoint=%d, unknown CNA type=%d\\n",
                    nlinks["cohort"] + 0, ntiles["cohort"] + 0, nlab["cohort"] + 0, tI + 0, tD + 0, tO + 0, tB + 0, tC + 0) > "/dev/stderr"
             if (nosample > 0) printf("WARN: %d rows with an empty SAMPLE were skipped\\n", nosample) > "/dev/stderr"
-        }' rec.proj.tsv sv.proj.tsv cna.proj.tsv snv.proj.tsv
+        }' rec.proj.tsv sv.proj.tsv sv.proj.tsv cna.proj.tsv snv.proj.tsv
 
     rm -f sv.proj.tsv cna.proj.tsv snv.proj.tsv rec.proj.tsv samples.txt samples.raw.txt
     """

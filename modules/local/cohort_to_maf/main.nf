@@ -11,11 +11,17 @@
 //              deletion starts one base after the VCF POS with Tumor_Seq_Allele2 "-", an
 //              insertion has Reference_Allele "-" and End = Start + 1.
 //   SV rows  : class SV_<SVTYPE> (upper-cased, TRA -> BND); Variant_Type DEL/INS/SV.
-//              BND -> the left breakend gene at the record's locus and the right breakend
-//              gene AT THE PARTNER LOCUS (from `breakpoint`, REF "N"); both only with
-//              gene_source == overlap; an intragenic BND (same gene both sides) gives one
-//              row. Other types -> each gene in Candidate_genes (panel-intersected upstream),
-//              deduplicated within the record. Mates collapsed on SAMPLE + ID minus _1/_2.
+//              BND -> the left breakend gene at the record's own locus, with its REF/ALT.
+//              A BND pair is two records (SAMPLE + ID minus _1/_2; the SV projection is read
+//              twice to pair them). With both present each writes its own row, and the _2 row
+//              is dropped when its gene equals the _1 record's (intragenic: one row). A record
+//              whose mate is absent -- AnnotSV keeps one record of a same-chromosome pair --
+//              also writes the right breakend gene AT THE PARTNER LOCUS (from `breakpoint`)
+//              with REF "N" and the mate's ALT, mirrored to point back at the record:
+//              t[p[ -> ]c:p]N, t]p] -> N]c:p], ]p]t -> N[c:p[, [p[t -> [c:p[N. Genes only
+//              with gene_source == overlap. The rows do not depend on which mate comes first.
+//              Other types -> each gene in Candidate_genes (panel-intersected upstream),
+//              deduplicated within the record.
 //   CN table : Gene, Sample_name, Amp|Del for Candidate_genes of each CNA segment; a gene
 //              with both states in one sample keeps the first and is counted (cn_conflicts).
 //   genes    : (panel & altered) U (altered in >= 2 samples), by altered-sample count
@@ -24,7 +30,8 @@
 //              treats as non-synonymous, the SV_* classes and copy number.
 //   rows with an empty SAMPLE or a non-numeric coordinate are skipped and counted
 //   (skipped_no_sample, skipped_bad_coordinate); a MAF row with a non-numeric position
-//   would break read.maf.
+//   would break read.maf. skipped_sv_duplicate_mates counts a repeated SAMPLE + ID and the
+//   _2 row of an intragenic BND pair.
 //
 // Consumer contract (MAFTOOLS_ONCOPLOT): read.maf must be called with
 // removeDuplicatedVariants = FALSE -- maftools de-duplicates on
@@ -134,6 +141,20 @@ process COHORT_TO_MAF {
             nmaf[src]++; nclass[vc]++
         }
         function trim(s) { gsub(/^ +| +\$/, "", s); return s }
+        function lgene() { return (\$13 == "overlap" && \$11 != "" && \$11 != "NA") ? \$11 : "" }
+        function rgene() { return (\$14 == "overlap" && \$12 != "" && \$12 != "NA") ? \$12 : "" }
+        # mate number from the _1 / _2 suffix of a BND ID ("" when it has none)
+        function mate(id) { return (id ~ /_1\$/) ? 1 : (id ~ /_2\$/) ? 2 : "" }
+        # ALT of the partner breakend, pointing back at the locus cp of this record (VCF 4.2, 5.4):
+        # t[p[ -> ]cp]N, t]p] -> N]cp], ]p]t -> N[cp[, [p[t -> [cp[N; a symbolic ALT is kept.
+        function mate_alt(alt, cp,    f, l) {
+            f = substr(alt, 1, 1); l = substr(alt, length(alt), 1)
+            if (l == "[") return "]" cp "]N"
+            if (l == "]") return "N]" cp "]"
+            if (f == "]") return "N[" cp "["
+            if (f == "[") return "[" cp "[N"
+            return alt
+        }
         BEGIN {
             split("Frame_Shift_Del Frame_Shift_Ins Splice_Site Translation_Start_Site Nonsense_Mutation Nonstop_Mutation In_Frame_Del In_Frame_Ins Missense_Mutation", nsl, " ")
             for (q in nsl) NS[nsl[q]] = 1
@@ -173,28 +194,41 @@ process COHORT_TO_MAF {
 
         # SV: 1 SAMPLE 2 ID 3 CHROM 4 POS 5 END 6 REF 7 ALT 8 SVTYPE 9 tier 10 Candidate_genes
         #     11 gene_left 12 gene_right 13 src_left 14 src_right 15 breakpoint
+        # Read twice: the first read records which BND mates are valid, and the _1 left gene.
+        FILENAME == svf && FNR == 1 { svpass++; next }
+        FILENAME == svf && svpass == 1 {
+            st = toupper(\$8)
+            if (\$1 == "" || (st != "BND" && st != "TRA") || !isnum(\$4)) next
+            m = mate(\$2); if (m == "") next
+            stem = \$2; sub(/_[12]\$/, "", stem)
+            valid[\$1, stem, m] = 1
+            if (m == 1) lg1[\$1, stem] = lgene()
+            next
+        }
         FILENAME == svf {
-            if (FNR == 1) next
             if (\$1 == "") { nosample++; next }
             st = toupper(\$8); if (st == "TRA") st = "BND"
-            key = \$2; if (st == "BND") sub(/_[12]\$/, "", key); key = \$1 SUBSEP key
-            if (key in seen) { dup++; next }
+            idk = \$1 SUBSEP \$2
+            if (idk in seen) { dup++; next }
             if (st != "BND" && st != "DEL" && st != "DUP" && st != "INV" && st != "INS") { badsv++; next }
             if (!isnum(\$4) || (st != "BND" && !isnum(\$5))) { badcoord++; next }
-            seen[key] = 1                              # only a VALID record blocks its mate
+            seen[idk] = 1                              # only a VALID record blocks a repeat
             vc = "SV_" st
             vt = (st == "DEL") ? "DEL" : (st == "INS") ? "INS" : "SV"
             ref = (\$6 == "" || \$6 == ".") ? "N" : \$6
             if (st == "BND") {
-                lg = (\$13 == "overlap" && \$11 != "" && \$11 != "NA") ? \$11 : ""
-                rg = (\$14 == "overlap" && \$12 != "" && \$12 != "NA") ? \$12 : ""
+                lg = lgene(); rg = rgene()
+                m = mate(\$2); stem = \$2; sub(/_[12]\$/, "", stem)
+                paired = (m != "" && ((\$1, stem, 3 - m) in valid))
+                # intragenic pair: the _1 row already names the gene
+                if (paired && m == 2 && lg != "" && lg == lg1[\$1, stem]) { dup++; next }
                 if (lg != "") maf_row(lg, \$3, \$4, \$4, ref, \$7, vc, vt, \$1, \$9, "SV")
-                if (rg != "" && rg != lg) {
+                if (!paired && rg != "" && rg != lg) {
                     # the partner locus: breakpoint is chrA:posA|chrB:posB
                     pc = ""; pp = ""
                     if (split(\$15, bp, "|") == 2) { split(bp[2], b, ":"); pc = b[1]; pp = b[2] }
                     if (pc == "" || !isnum(pp)) badcoord++
-                    else maf_row(rg, pc, pp, pp, "N", \$7, vc, vt, \$1, \$9, "SV")
+                    else maf_row(rg, pc, pp, pp, "N", mate_alt(\$7, \$3 ":" \$4), vc, vt, \$1, \$9, "SV")
                 }
             } else if (\$10 != "" && \$10 != "NA") {
                 delete gseen
@@ -258,7 +292,7 @@ process COHORT_TO_MAF {
             for (v in nclass) print "class_" v, nclass[v] > "class.tmp"
             printf("INFO: MAF rows SNV=%d SV=%d; CN rows=%d; clinical=%d; unmapped terms=%d\\n", nmaf["SNV"] + 0, nmaf["SV"] + 0, ncn + 0, nclin + 0, nu) > "/dev/stderr"
             if (nosample + badcoord > 0) printf("WARN: skipped %d rows with an empty SAMPLE and %d with a non-numeric coordinate\\n", nosample + 0, badcoord + 0) > "/dev/stderr"
-        }' ${vep_lookup} snv.proj.tsv sv.proj.tsv cna.proj.tsv clin.proj.tsv
+        }' ${vep_lookup} snv.proj.tsv sv.proj.tsv sv.proj.tsv cna.proj.tsv clin.proj.tsv
     [ -f pairs.tsv ] || : > pairs.tsv
     [ -f unmapped.tmp ] || : > unmapped.tmp
     [ -f class.tmp ] || : > class.tmp

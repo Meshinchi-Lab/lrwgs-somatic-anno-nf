@@ -1,3 +1,14 @@
+// modules/local/bcftools/rescue_bnd/main.nf
+// Add back the BND records that failed a vembrane filter while their mate passed, so a
+// translocation keeps both breakend records. A record is rescued when its INFO/MATE_ID is
+// among the passing IDs; it is copied from original_vcf (the filter's input). FILTER_SV runs
+// it after pass 1 (original = the annotated VCF) and after pass 2 (original = the pass-1
+// VCF), and sorts its output.
+//
+// Same-chromosome pairs reach FILTER_SV as ONE record: AnnotSV annotates the first mate as a
+// spanning SV and writes the other to *.unannotated.tsv ("reciprocal breakend"). There is no
+// mate to rescue for them; the kept record's ALT names both breakpoints.
+
 process BCFTOOLS_RESCUE_BND {
     tag "$meta.id"
     label 'process_low'
