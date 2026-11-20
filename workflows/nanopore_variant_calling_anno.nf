@@ -462,7 +462,7 @@ workflow NANOPORE_VARIANT_CALLING_ANNO {
             SV_REPORT_INDEX.out.tsv_sv.map { tsv -> [ [ id: 'cohort' ], tsv ] },
             ANNOTATIONS_SV.out.vep_vcf.join( ANNOTATIONS_SV.out.vep_tbi, by: 0 ),
             fasta_ch2,
-            fasta_fai.map { meta, _fa, fai -> [ meta, fai ] }
+            ch_fai
         )
         // COHORT_MERGE_SV skips Jasmine below N=2, so each emit can be empty: ifEmpty([]) keeps
         // pass 2 scheduled and the qmd renders its "unavailable" cards, instead of the whole

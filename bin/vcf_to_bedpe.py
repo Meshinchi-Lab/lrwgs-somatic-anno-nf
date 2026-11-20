@@ -26,11 +26,11 @@ compact records don't get a wall of empty fields.
 
 Chromosome-name normalisation
 -----------------------------
-The SV pass2 VCF and its BND ALT bracket notation use different naming
-styles — bare `14` from `%CHROM` versus `chr5` from the ALT bracket parse.
-`normalize_chrom()` forces both to the UCSC `chr`-prefix used by BAM,
-ST17/ST19 reference BEDs, RefSeq gene tracks, and the cytoband ideogram
-so overlap queries and IGV browsing all agree on names.
+`%CHROM` and the BND ALT partners carry the reference FASTA's names (the
+reheader steps after AnnotSV restore them). `normalize_chrom()` keeps
+`chr`-prefixed names and prefixes bare ones, so a bare-named reference still
+matches the UCSC `chr` names used by the BAM, ST17/ST19 reference BEDs,
+RefSeq gene tracks and the cytoband ideogram in overlap queries and IGV.
 
 Candidate-gene-preferred gene list
 ----------------------------------
@@ -69,10 +69,9 @@ BND_RE = re.compile(r'[\[\]]([^:\[\]]+):(\d+)[\[\]]')
 def normalize_chrom(chrom: str) -> str:
     """Force UCSC `chr`-prefix naming on a chromosome label.
 
-    Handles the naming-style split between the SV pass2 VCF (bare `%CHROM`
-    like `14`) and its BND ALT bracket notation (already `chr`-prefixed like
-    `chr5`). Ensures every BEDPE row has consistent chromosome names that
-    match BAM / ST17 / RefSeq / cytoband inputs.
+    CHROM and BND ALT partners follow the reference FASTA's naming; this
+    keeps `chr` names and prefixes bare ones (a bare-named reference), so
+    every BEDPE row matches the BAM / ST17 / RefSeq / cytoband inputs.
 
     Rules:
       - already-`chr` prefixed → unchanged

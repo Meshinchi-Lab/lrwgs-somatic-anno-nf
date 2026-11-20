@@ -287,10 +287,10 @@ dt_guard_cells <- function(df, wrap_at = 40L, max_chars = 60L) {
 #
 # BND with unparseable ALT falls back to "chr21:100000".
 #
-# Fully vectorized via `str_match` on the ALT column (no rowwise). The
-# `chr` prefix is added when absent (raw CHROM in the merged VCF is bare
-# "21" while ALT partner uses "chr21" — normalize both sides for consistent
-# display).
+# Fully vectorized via `str_match` on the ALT column (no rowwise). CHROM and
+# the ALT partner carry the reference FASTA's names (restored after AnnotSV by
+# the reheader steps), so the `chr` prefix is added only when absent, for a
+# bare-named reference.
 compute_breakpoint <- function(chrom, pos, end, alt, svtype) {
   chrom  <- as.character(chrom)
   pos    <- as.character(pos)
@@ -3415,7 +3415,7 @@ DT::datatable(
 #
 # THREE THINGS THE SPEC REQUIRES THAT THE PASS2 TABLE DOES NOT ALREADY SATISFY:
 #   1. positions are 0-BASED   -> POS - 1 (VCF POS is 1-based)
-#   2. chromosomes need "chr"  -> raw CHROM is bare ("21")
+#   2. chromosomes need "chr"  -> .pfx() adds it when the reference is bare-named
 #   3. one row per EVENT       -> an interchromosomal BND is TWO VCF records
 #                                 (both breakends); emitting both duplicates it
 #
