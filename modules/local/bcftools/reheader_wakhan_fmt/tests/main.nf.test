@@ -1,0 +1,88 @@
+// modules/local/bcftools/reheader_wakhan_fmt/tests/main.nf.test
+nextflow_process {
+
+    name "Test Process BCFTOOLS_REHEADER_WAKHAN_FMT"
+    script "../main.nf"
+    process "BCFTOOLS_REHEADER_WAKHAN_FMT"
+    tag "modules"
+    tag "bcftools_reheader_wakhan_fmt"
+
+    // cna_annotsv_style.vcf is shaped like AnnotSV's CNA VCF: bare CHROM (21, X, M), an Ensembl-style
+    // contig header declaring MT, Wakhan FORMAT tags used but undeclared, one bare BPS flag, and a
+    // mitochondrial record written as M at POS 0.
+    // wakhan_original.vcf supplies the ##FORMAT lines, as the original Wakhan VCF does in the pipeline.
+
+    test("UCSC-style FASTA - FORMAT restored, chr names restored, BPS repaired, contigs from the .fai") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ],
+                             file("\${fx}/cna_annotsv_style.vcf", checkIfExists: true),
+                             file("\${fx}/wakhan_original.vcf", checkIfExists: true) ]
+                input[1] = 'wakhan'
+                input[2] = [ [ id: 'ref' ], file("\${fx}/ucsc.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.vcf[0][1]).linesGzip
+            def recs  = lines.findAll { !it.startsWith('#') }.collectEntries { l -> def f = l.split('\t', -1); [ (f[2]): f ] }
+            assert recs.collectEntries { id, f -> [ (id): f[0] ] } ==
+                   [ wakhan_1: 'chr21', wakhan_2: 'chr21', wakhan_3: 'chrX', wakhan_4: 'chrM' ]
+            assert recs.wakhan_4[1] == '0'   // POS 0 survives the 0<->1 annotate workaround on a renamed contig
+            def contigs = lines.findAll { it.startsWith('##contig=') }.collect { l ->
+                [ (l =~ /ID=([^,>]+)/)[0][1], (l =~ /length=([0-9]+)/)[0][1] ] }
+            def fai = file("${projectDir}/tests/fixtures/annotsv_contigs/ucsc.fa.fai").readLines()
+                .collect { l -> def f = l.split('\t'); [ f[0], f[1] ] }
+            assert contigs == fai   // names, lengths and .fai order
+            assert lines.any { it.startsWith('##FORMAT=<ID=TCN,Number=1,Type=Float,') }
+            assert lines.any { it.startsWith('##INFO=<ID=BPS,Number=.,Type=String') }
+            assert recs.wakhan_1[7].split(';').contains('BPS=severus_DUP4006')
+            // the auditable BPS table carries the FASTA names and the bare flag as "."
+            assert file(process.out.bps_source[0][1]).readLines() ==
+                   [ "chr21\t13000001\tseverus_DUP4006", "chr21\t31877980\t.", "chrX\t1000\tseverus_DEL1", "chrM\t0\tseverus_M1" ]
+        }
+    }
+
+    test("CHROM missing from the FASTA - fails naming the contig") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ],
+                             file("\${fx}/cna_annotsv_style.vcf", checkIfExists: true),
+                             file("\${fx}/wakhan_original.vcf", checkIfExists: true) ]
+                input[1] = 'wakhan'
+                input[2] = [ [ id: 'ref' ], file("\${fx}/no_chrx.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).any {
+                it.contains("with no contig in the reference FASTA index") && it.endsWith(": X") }
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ],
+                             file("\${fx}/cna_annotsv_style.vcf", checkIfExists: true),
+                             file("\${fx}/wakhan_original.vcf", checkIfExists: true) ]
+                input[1] = 'wakhan'
+                input[2] = [ [ id: 'ref' ], file("\${fx}/ucsc.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.vcf[0][1]).name == 'S1.cna.annotated.vcf.gz'
+        }
+    }
+}

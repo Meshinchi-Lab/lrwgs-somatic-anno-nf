@@ -1,0 +1,125 @@
+// modules/local/bcftools/reheader_savana_fmt/tests/main.nf.test
+nextflow_process {
+
+    name "Test Process BCFTOOLS_REHEADER_SAVANA_FMT"
+    script "../main.nf"
+    process "BCFTOOLS_REHEADER_SAVANA_FMT"
+    tag "modules"
+    tag "bcftools_reheader_savana_fmt"
+
+    // sv_annotsv_style*.vcf are shaped like AnnotSV's SV VCF: bare CHROM (2, 21, M, X), an
+    // Ensembl-style contig header declaring MT (not M), and VAF/hVAF/DR/DV used in records but
+    // undeclared. BND mates keep the calling reference's names (chr-prefixed, or bare in the
+    // _ensembl_ref copy).
+
+    test("UCSC-style FASTA - FORMAT restored, chr names restored, M becomes chrM, contigs from the .fai") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/sv_annotsv_style.vcf", checkIfExists: true) ]
+                input[1] = [ [ id: 'ref' ], file("\${fx}/ucsc.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.vcf[0][1]).linesGzip
+            def recs  = lines.findAll { !it.startsWith('#') }.collectEntries { l -> def f = l.split('\t', -1); [ (f[2]): f ] }
+            assert recs.collectEntries { id, f -> [ (id): f[0] ] } ==
+                   [ bnd_1: 'chr2', bnd_2: 'chr21', del_mito: 'chrM', dup_x: 'chrX' ]
+            assert recs.bnd_1[4] == '[chr21:34816131[N'
+            assert recs.bnd_2[4] == '[chr2:99727265[N'
+            // POS onwards is unchanged: only CHROM is renamed
+            def inRecs = file("${projectDir}/tests/fixtures/annotsv_contigs/sv_annotsv_style.vcf").readLines()
+                .findAll { !it.startsWith('#') }.collectEntries { l -> def f = l.split('\t', -1); [ (f[2]): f ] }
+            recs.each { id, f -> assert f[1..-1] == inRecs[id][1..-1] }
+            // header contigs are exactly the .fai's names and lengths, in .fai order; AnnotSV's MT is gone
+            def contigs = lines.findAll { it.startsWith('##contig=') }.collect { l ->
+                [ (l =~ /ID=([^,>]+)/)[0][1], (l =~ /length=([0-9]+)/)[0][1] ] }
+            def fai = file("${projectDir}/tests/fixtures/annotsv_contigs/ucsc.fa.fai").readLines()
+                .collect { l -> def f = l.split('\t'); [ f[0], f[1] ] }
+            assert contigs == fai   // names, lengths and .fai order
+            // the FORMAT definitions this module exists to restore keep their types
+            assert lines.any { it.startsWith('##FORMAT=<ID=VAF,Number=1,Type=Float,') }
+            assert lines.any { it.startsWith('##FORMAT=<ID=hVAF,Number=3,Type=Float,') }
+            assert lines.any { it.startsWith('##FORMAT=<ID=DR,Number=1,Type=Integer,') }
+            assert lines.any { it.startsWith('##FORMAT=<ID=DV,Number=1,Type=Integer,') }
+            assert process.out.versions_bcftools[0][1] == 'bcftools'
+        }
+    }
+
+    test("Ensembl-style FASTA - bare names kept, M becomes MT, one MT contig") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/sv_annotsv_style_ensembl_ref.vcf", checkIfExists: true) ]
+                input[1] = [ [ id: 'ref' ], file("\${fx}/ensembl.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.vcf[0][1]).linesGzip
+            def recs  = lines.findAll { !it.startsWith('#') }.collectEntries { l -> def f = l.split('\t', -1); [ (f[2]): f ] }
+            assert recs.collectEntries { id, f -> [ (id): f[0] ] } ==
+                   [ bnd_1: '2', bnd_2: '21', del_mito: 'MT', dup_x: 'X' ]
+            def ids = lines.findAll { it.startsWith('##contig=') }.collect { (it =~ /ID=([^,>]+)/)[0][1] }
+            assert ids == [ '1', '2', '21', 'X', 'Y', 'MT' ]
+        }
+    }
+
+    test("CHROM missing from the FASTA - fails naming the contig") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/sv_annotsv_style.vcf", checkIfExists: true) ]
+                input[1] = [ [ id: 'ref' ], file("\${fx}/no_chrx.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.failed
+            assert (process.stdout + process.stderr).any {
+                it.contains("with no contig in the reference FASTA index") && it.endsWith(": X") }
+        }
+    }
+
+    test("Header-only VCF - succeeds with the .fai's contigs and no records") {
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/sv_annotsv_style_header_only.vcf", checkIfExists: true) ]
+                input[1] = [ [ id: 'ref' ], file("\${fx}/ucsc.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            def lines = path(process.out.vcf[0][1]).linesGzip
+            assert lines.findAll { !it.startsWith('#') }.isEmpty()
+            assert lines.findAll { it.startsWith('##contig=') }.collect { (it =~ /ID=([^,>]+)/)[0][1] } ==
+                   [ 'chr1', 'chr2', 'chr21', 'chrX', 'chrY', 'chrM' ]
+        }
+    }
+
+    test("stub") {
+        options "-stub"
+        when {
+            process {
+                """
+                def fx = "\${projectDir}/tests/fixtures/annotsv_contigs"
+                input[0] = [ [ id: 'S1' ], file("\${fx}/sv_annotsv_style.vcf", checkIfExists: true) ]
+                input[1] = [ [ id: 'ref' ], file("\${fx}/ucsc.fa.fai", checkIfExists: true) ]
+                """
+            }
+        }
+        then {
+            assert process.success
+            assert file(process.out.vcf[0][1]).name == 'S1.ensemble.vcf.gz'
+        }
+    }
+}
