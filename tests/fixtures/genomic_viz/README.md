@@ -2,9 +2,9 @@
 
 Trimmed, synthetic two-sample (colo829, coloSAV) versions of the report's pass-1 cohort
 tables, used by the nf-tests of `COHORT_TO_CIRCOS`, `COHORT_TO_MAF` and `MAFTOOLS_ONCOPLOT`.
-Only the columns the converters read are present (plus `Gene_name_display` in the CNA table, kept for realism); the real tables have ~100. Chromosome
-naming mirrors the real tables: SV/CNA `CHROM` without `chr`; `breakpoint`, `ALT` and SNV
-`CHROM` with it.
+Only the columns the converters read are present (plus `Gene_name_display` in the CNA table, kept for realism); the real tables have ~100. Chromosome naming mirrors the real tables: SV `CHROM`, `breakpoint`, `ALT` and SNV `CHROM` carry
+`chr` (the reference FASTA's names); the CNA table and `c2m_edge.sv.tsv` keep the older
+unprefixed `CHROM`, which the converters also accept.
 
 ## Rows and what each exercises
 
@@ -13,15 +13,19 @@ naming mirrors the real tables: SV/CNA `CHROM` without `chr`; `breakpoint`, `ALT
   overlap (BCL11B), right gene nearest (TLX3) so only BCL11B is labelled. In the map with
   n_any = 2 → thickness 4p.
 - `severus_BND3978_2/_1` (colo829, T1): BND pair listed `_2` FIRST, as the real table often
-  is (it is sorted by CHROM as text). The converters keep the first mate seen, so the link
-  runs chr2 → chr21 and in the MAF the left gene AFF3 sits at the kept mate's locus (chr2:99727265, REF T) and the right gene RUNX1 at the partner locus (chr21:34816131, REF N); both genes overlap (AFF3,
-  RUNX1). Both mates are in the map → 4p.
+  is (it is sorted by CHROM as text). COHORT_TO_CIRCOS draws the `_1` record whatever the
+  order, so the link runs chr21 → chr2; both genes overlap (AFF3, RUNX1). Both mates are in
+  the map → 4p.
+  In the MAF each mate writes its own left gene with its own REF/ALT: RUNX1 at
+  chr21:34816131 (REF A, ALT `[chr2:99727265[N`) and AFF3 at chr2:99727265 (REF T, ALT
+  `[chr21:34816131[N`).
 - `severus_DEL3918` (colo829, T2): intrachromosomal DEL; `Candidate_genes` = PCBP3 → the only
   non-BND MAF row (`SV_DEL` / `DEL`); absent from the map → 3p.
 - `severus_INS13400` (colo829, T3): INS → skipped by COHORT_TO_CIRCOS by type; COHORT_TO_MAF would
   map it to `SV_INS` but writes no row only because `Candidate_genes` is `NA`.
 - `severus_BND3977_1` (coloSAV, T1): unpaired `_1` (mate filtered out upstream); genes RUNX1,
-  TLX3; n_any = 1 → 2p.
+  TLX3; n_any = 1 → 2p. In the MAF the TLX3 row sits at the partner locus chr5:171274715 with REF N
+  and the ALT mirrored to point back at the record, `]chr21:34797509]N`.
 - `severus_INV4029` (coloSAV, T3): INV link; empty `Candidate_genes` (the real table leaves it
   blank) → no MAF row.
 - `severus_BND_X1_1` (coloSAV, T3): partner on chrM → off-karyotype, dropped; `gene_name_right`
@@ -38,6 +42,17 @@ deletion (Frame_Shift_Del / DEL); `weird_term` (unmapped → `unmapped_consequen
 (cluster prefix = index of the representative sample: `0_` colo829, `1_` coloSAV; `supp_vec`
 `11` / `01`; both `BND3978` mates are listed, the ST2671 `_2` mate is not because it is dropped
 as a duplicate before any lookup). Only `source_id` (= `<SAMPLE>_<ID>`) and `n_any` are read.
+
+`c2c_mates.sv.tsv` / `c2c_mates_rev.sv.tsv` (COHORT_TO_CIRCOS; the same rows in reverse
+order): pair `m_p` listed `_2` first (drawn from `_1`, hs1 → hs2); pair `m_k` whose `_1` has
+no usable `breakpoint` (counted as bad_breakpoint; `_2` is drawn); `m_q`, a `_2` with no `_1`.
+Both files give the same links, labels and counts.
+
+`c2m_mates.sv.tsv` / `c2m_mates_rev.sv.tsv` (COHORT_TO_MAF; the same rows in reverse order):
+complete pair `m_p` (`_2` first; each mate its own row, REF and ALT), intragenic pair `m_i`
+(one row, the `_2` row counted in `skipped_sv_duplicate_mates`), and one record without a
+mate for each breakend ALT form (`m_a` t[p[, `m_b` t]p], `m_c` ]p]t, `m_d` [p[t), whose partner
+rows carry REF N and the mirrored ALT. Both files give the same rows.
 
 `candidate_genes.txt`: 12-gene panel. TMPRSS15 is deliberately NOT on it; ETV6 and PCBP3 are
 (ETV6 never survives to the MAF, PCBP3 only through the DEL).
@@ -68,7 +83,7 @@ SVs before SNVs). It is deliberately NOT regenerated: the onco matrix stays 10 g
 
 ## COHORT_TO_MAF edge cases
 
-`c2m_edge.sv.tsv`: a lower-case `tra` BND pair (TRA → BND; the `_2` mate is a duplicate), an intragenic BND (same gene both sides → one row), a lower-case `dup` with a repeated gene in `Candidate_genes` (two rows, de-duplicated within the record), a row with an empty SAMPLE, a DEL with `POS = NA` (bad coordinate), and GENEQ deleted in both samples. `c2m_edge.snv.tsv`: a frameshift insertion (`Frame_Shift_Ins`, MAF form `-`/`TT` at 700-701), a +3 `protein_altering_variant` (`In_Frame_Ins`), a DNP, `splice_donor_5th_base_variant&intron_variant` (→ `Splice_Region`, not counted as altered), an `intron_variant`, an empty consequence (→ `(empty)` in the unmapped file), a `POS = NA` row, GENEK mutated in both samples, and a deletion with no shared anchor base (`ATG > C`: Start = POS, no shift). `c2m_edge.cna.tsv`: GENEP gained and lost in S1 (conflict counted, first state kept), a lower-case `amp`. `c2m_edge.panel.txt`: GENEB and GENEQ, so the gene universe with `top = 2` tests the count-desc → panel-first → name order (GENEQ before GENEK) and the cap. The SV table has no `sex`/`etp` columns, so the clinical table is header-only.
+`c2m_edge.sv.tsv`: a lower-case `tra` BND pair (TRA → BND; each mate writes its own row, GENEA and GENEB), an intragenic BND (same gene both sides → one row), a lower-case `dup` with a repeated gene in `Candidate_genes` (two rows, de-duplicated within the record), a row with an empty SAMPLE, a DEL with `POS = NA` (bad coordinate), and GENEQ deleted in both samples. `c2m_edge.snv.tsv`: a frameshift insertion (`Frame_Shift_Ins`, MAF form `-`/`TT` at 700-701), a +3 `protein_altering_variant` (`In_Frame_Ins`), a DNP, `splice_donor_5th_base_variant&intron_variant` (→ `Splice_Region`, not counted as altered), an `intron_variant`, an empty consequence (→ `(empty)` in the unmapped file), a `POS = NA` row, GENEK mutated in both samples, and a deletion with no shared anchor base (`ATG > C`: Start = POS, no shift). `c2m_edge.cna.tsv`: GENEP gained and lost in S1 (conflict counted, first state kept), a lower-case `amp`. `c2m_edge.panel.txt`: GENEB and GENEQ, so the gene universe with `top = 2` tests the count-desc → panel-first → name order (GENEQ before GENEK) and the cap. The SV table has no `sex`/`etp` columns, so the clinical table is header-only.
 
 ## MAFTOOLS_ONCOPLOT empty inputs
 

@@ -1,0 +1,8 @@
+SAMPLE	ID	CHROM	POS	END	ALT	SVTYPE	driver_tier	gene_name_left	gene_name_right	canonical_transcript_left	canonical_transcript_right	gene_strand_left	gene_strand_right	gene_biotype_left	gene_biotype_right	gene_source_left	gene_source_right	DV
+S1	sv_del_mm	chr1	1000	5000	<DEL>	DEL	1	GENEL	GENER	ENST00000000001	ENST00000000002	-	-	protein_coding	protein_coding	overlap	overlap	10
+S1	sv_inv_2	chr14	100	100	N]chr5:200]	BND	1	GENEM	GENEP	ENST00000000003	ENST00000000004	-	+	protein_coding	protein_coding	overlap	overlap	8
+S1	sv_inv_1	chr5	200	200	N]chr14:100]	BND	1	GENEP	GENEM	ENST00000000004	ENST00000000003	+	-	protein_coding	protein_coding	overlap	overlap	8
+S2	sv_one_2	chr5	171319244	171319244	]chr14:99232731]N	BND	1	TLX3	BCL11B	ENST00000296921	ENST00000357195	+	-	protein_coding	protein_coding	nearest	overlap	12
+S2	sv_anti_2	chr4	400	400	]chr3:300]N	BND	2	GENEB	GENEA	ENST00000000006	ENST00000000005	-	+	protein_coding	protein_coding	overlap	overlap	5
+S2	sv_anti_1	chr3	300	300	N[chr4:400[	BND	2	GENEA	GENEB	ENST00000000005	ENST00000000006	+	-	protein_coding	protein_coding	overlap	overlap	5
+S2	sv_none_2	chr7	700	700	N[chr8:800[	BND	2	GENEX	GENEY	ENST00000000007	ENST00000000008	+	-	protein_coding	protein_coding	nearest	nearest	3

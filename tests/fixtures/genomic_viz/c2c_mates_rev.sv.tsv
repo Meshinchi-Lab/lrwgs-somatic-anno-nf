@@ -1,0 +1,6 @@
+SAMPLE	ID	CHROM	POS	END	SVTYPE	breakpoint	driver_tier	Gene_name_display	gene_name_left	gene_name_right	gene_source_left	gene_source_right
+S1	m_q_2	5	500	500	BND	chr5:500|chr6:600	3	GENEE	GENEE	GENEF	nearest	nearest
+S1	m_k_2	4	400	400	BND	chr4:400|chr3:300	2	GENED	GENED	GENEC	nearest	nearest
+S1	m_k_1	3	300	300	BND	NA	2	GENEC	GENEC	GENED	nearest	nearest
+S1	m_p_1	1	100	100	BND	chr1:100|chr2:200	NA	GENEA	GENEA	GENEB	overlap	overlap
+S1	m_p_2	2	200	200	BND	chr2:200|chr1:100	1	GENEB	GENEB	GENEA	overlap	overlap
