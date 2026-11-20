@@ -1244,7 +1244,7 @@ qmd_computed_defs <- tibble::tribble(
   "CytoBand_display", "chr<CHROM> prefix prepended to the AnnotSV CytoBand cell for a full-locus label",
   "Gene_name_display","Semicolon-joined unique SYMBOL list, dedup'd from AnnotSV's full-mode + per-split-mode Gene_name concatenation",
   "Candidate_genes",  "Intersection of Gene_name with the user candidate-gene panel (params.candidate_genes)",
-  "has_mate",         "Whether both ends of a BND event survived the filter (TRUE = mate pair present, FALSE = orphaned BND)",
+  "has_mate",         "BND only: TRUE when both breakend records of the pair are in this sample's pass-2 table; FALSE for a single record, which is normal for a same-chromosome pair (AnnotSV keeps one record) and otherwise means the mate was filtered out",
   "cluster_id",       "Jasmine cluster this record belongs to (ID of the representative record in cohort.sv.merged.vcf.gz, from COHORT_MERGE_SV); NA when the cohort merge did not run (pass 1 / run_cohort_merge_sv=false)",
   "n_tiered",         "Number of cohort samples in which this cluster is a Tier 1/2/3 call in this report (JASMINE_CLUSTER_MAP)",
   "n_any",            "Number of cohort samples with ANY pre-filter evidence in the cluster (Jasmine INFO/SUPP); n_any > n_tiered means the SV was called but filtered out in other samples",
@@ -1906,8 +1906,15 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
     NULL
   }
 
+  # Breakpoints are keyed by SAMPLE + ID: caller IDs are per-sample counters, so
+  # the same ID names different events in different samples (a 52-sample cohort
+  # had 44 IDs shared at different loci). Keyed by ID alone, one sample's genes
+  # were joined onto every other sample's record with that ID. Below, the `ID`
+  # column of bp_df / hits / lr holds this key, not the caller ID.
+  bp_key <- function(sample, id) paste(sample, id, sep = "\t")
   bp_df <- purrr::pmap(
-    list(pass2_clean$breakpoint, pass2_clean$SVTYPE, pass2_clean$ID),
+    list(pass2_clean$breakpoint, pass2_clean$SVTYPE,
+         bp_key(pass2_clean$SAMPLE, pass2_clean$ID)),
     bp_split
   ) |> purrr::compact() |> dplyr::bind_rows()
 
@@ -2046,7 +2053,9 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
                          names_glue  = "{.value}_{side}")
 
     pass2_clean <- pass2_clean |>
-      dplyr::left_join(lr, by = "ID") |>
+      dplyr::mutate(.bp_key = bp_key(SAMPLE, ID)) |>
+      dplyr::left_join(dplyr::rename(lr, .bp_key = ID), by = ".bp_key") |>
+      dplyr::select(-.bp_key) |>
       dplyr::mutate(
         # For BNDs the pair reads as a fusion (matches ST17_hit shape:
         # `GENE_A::GENE_B`). For non-BND records the two anchors are on
@@ -2074,13 +2083,15 @@ if (edb_annot_available && nrow(pass2_clean) > 0 &&
   }
 }
 
-# has_mate — True when both _1 and _2 mates of a BND survive pass2.
-# Simple: strip trailing `_1` / `_2` and count records per stripped ID.
-# Non-BND records (no _1/_2 suffix) get has_mate = FALSE (mate concept
-# doesn't apply). Useful for sort / filter in the DT: T1 BND records
-# with has_mate=TRUE are the highest-confidence fusion calls.
+# has_mate — TRUE when both the _1 and _2 records of a BND are in this
+# sample's pass-2 table (FILTER_SV adds back a mate that failed pass 2 but
+# passed pass 1). IDs repeat across samples, so records are counted per
+# SAMPLE + ID without the _1/_2 suffix. A same-chromosome pair reaches the
+# table as ONE record (AnnotSV keeps the first mate and annotates it as a
+# spanning SV), so FALSE there does not mean a lost mate. Non-BND records
+# get FALSE (the mate concept does not apply).
 pass2_clean <- pass2_clean |>
-  group_by(ID_SHORT = str_remove(as.character(ID), "_[12]$")) |>
+  group_by(SAMPLE, ID_SHORT = str_remove(as.character(ID), "_[12]$")) |>
   mutate(has_mate = (SVTYPE == "BND" & dplyr::n() == 2L)) |>
   ungroup() |>
   select(-ID_SHORT)
@@ -3419,11 +3430,15 @@ DT::datatable(
 #   3. one row per EVENT       -> an interchromosomal BND is TWO VCF records
 #                                 (both breakends); emitting both duplicates it
 #
-# 5'/3' ASSIGNMENT comes from the ALT bracket orientation, NOT from POS order.
-# VCF 4.2 breakend forms:  t[p[ and t]p]  -> THIS record is 5'
-#                          ]p]t and [p[t  -> the PARTNER is 5'
-# i.e. an ALT beginning with the ref base means this side is 5'. Both mates of a
-# pair independently agree on the assignment, so dedup may keep either one.
+# 5'/3' ORDER (gene_a first) comes from the junction and the gene strands, the
+# same rule the Gene Fusion app lines use (.b_first below):
+#   1. both breakends inside two different genes, exactly one contributing its
+#      5' part -> that breakend first (a sense fusion);
+#   2. otherwise exactly one breakend inside a gene -> that breakend first;
+#   3. otherwise the record's own breakend first.
+# A BND pair is two records, <stem>_1 and <stem>_2; the _1 record is kept (or
+# the only mate present), so step 3 does not depend on row order. Steps 1-2
+# give the same order from either mate.
 #
 # INS is excluded: END == POS gives no second breakpoint, and ProteinPaint's
 # model is two joined breakpoints. (The spec's "inserted segment" is a different
@@ -3464,6 +3479,7 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
 
   .d <- tibble::tibble(
     SAMPLE = as.character(pass2_clean$SAMPLE),
+    ID     = .col("ID"),
     CHROM  = as.character(pass2_clean$CHROM),
     POS    = suppressWarnings(as.numeric(pass2_clean$POS)),
     END    = suppressWarnings(as.numeric(pass2_clean$END)),
@@ -3484,33 +3500,80 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
     .m     <- stringr::str_match(.d$ALT, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
     .isbnd <- .d$SVTYPE == "BND" | grepl("[\\[\\]]", .d$ALT)
     .ok    <- !is.na(.m[, 2])
-    .five  <- grepl("^[ACGTNacgtn]", .d$ALT)      # this record is the 5' side
+
+    # Two breakends per record: "this" = CHROM:POS with the left gene; "other" =
+    # the BND partner from ALT, else END, with the right gene.
+    .d <- .d |>
+      dplyr::mutate(
+        .bnd  = .isbnd & .ok,
+        chr_t = .pfx(CHROM),
+        pos_t = POS,
+        chr_o = .pfx(ifelse(.bnd, .m[, 2], CHROM)),
+        pos_o = ifelse(.bnd, suppressWarnings(as.numeric(.m[, 3])), END),
+        .mate = ifelse(.bnd & grepl("_2$", ID), 2L, 1L)
+      ) |>
+      # drop non-BND records that have no usable second breakpoint
+      dplyr::filter(!is.na(pos_t), !is.na(pos_o), pos_t != pos_o | .bnd) |>
+      # one row per event: collapse the two breakends of a BND pair, keeping the
+      # _1 record; other records sharing both breakpoints keep the lowest ID
+      dplyr::mutate(.key = paste(SAMPLE,
+                                 pmin(paste0(chr_t, ":", pos_t), paste0(chr_o, ":", pos_o)),
+                                 pmax(paste0(chr_t, ":", pos_t), paste0(chr_o, ":", pos_o)))) |>
+      dplyr::arrange(.mate, ID) |>
+      dplyr::distinct(.key, .keep_all = TRUE) |>
+      dplyr::arrange(SAMPLE, chr_t, pos_t, chr_o, pos_o)
+
+    # Kept side at a junction: "L" = the segment LEFT of the breakpoint is kept,
+    # "R" = the segment right of it. One c(this, other) pair per junction:
+    #   BND  ALT t[p[ / t]p]: this LEFT;  ]p]t / [p[t: this RIGHT;
+    #        partner RIGHT when the bracket is "[", LEFT when it is "]"
+    #   DEL  POS LEFT, END RIGHT     DUP  POS RIGHT, END LEFT
+    #   INV  two junctions: POS LEFT + END LEFT, and POS RIGHT + END RIGHT
+    .junctions <- function(bnd, alt, svtype) {
+      if (bnd) return(list(c(if (grepl("^[ACGTNacgtn]", alt)) "L" else "R",
+                             if (grepl("\\[", alt)) "R" else "L")))
+      switch(svtype,
+        DEL = list(c("L", "R")),
+        DUP = list(c("R", "L")),
+        INV = list(c("L", "L"), c("R", "R")),
+        list())
+    }
+    .gf_side <- function(chr, pos, gene, strand, src)
+      list(chr = chr, pos = pos, gene = dplyr::coalesce(gene, ""),
+           strand = dplyr::coalesce(strand, ""), genic = !is.na(src) & src == "overlap")
+    .sides <- function(d, i) list(
+      this  = .gf_side(d$chr_t[i], d$pos_t[i], d$g_l[i], d$s_l[i], d$o_l[i]),
+      other = .gf_side(d$chr_o[i], d$pos_o[i], d$g_r[i], d$s_r[i], d$o_r[i]))
+    # A breakend contributes its gene's 5' part when the kept segment lies LEFT of
+    # the breakpoint and the gene is on "+", or RIGHT and on "-".
+    .five <- function(k, s) (k == "L" && s == "+") || (k == "R" && s == "-")
+    # TRUE when breakend b comes first (5' / gene_a), by the order rule above.
+    .b_first <- function(a, ka, b, kb) {
+      if (a$genic && b$genic && a$gene != b$gene) {
+        fa <- .five(ka, a$strand); fb <- .five(kb, b$strand)
+        if (fa != fb) return(fb)
+      }
+      if (a$genic != b$genic) return(b$genic)
+      FALSE
+    }
+    # The first junction orders the row (an INV has two); with none, steps 2-3 only.
+    .flip <- vapply(seq_len(nrow(.d)), function(i) {
+      s <- .sides(.d, i)
+      k <- c(.junctions(.d$.bnd[i], .d$ALT[i], .d$SVTYPE[i]), list(c("", "")))[[1]]
+      .b_first(s$this, k[1], s$other, k[2])
+    }, logical(1))
 
     .d <- .d |>
       dplyr::mutate(
-        .bnd = .isbnd & .ok,
-        chr_a = .pfx(ifelse(.bnd & !.five, .m[, 2], CHROM)),
-        pos_a = ifelse(.bnd & !.five, suppressWarnings(as.numeric(.m[, 3])), POS),
-        gen_a = ifelse(.bnd & !.five, g_r, g_l),
-        iso_a = ifelse(.bnd & !.five, t_r, t_l),
-        str_a = ifelse(.bnd & !.five, s_r, s_l),
-        bio_a = ifelse(.bnd & !.five, b_r, b_l),
-        src_a = ifelse(.bnd & !.five, o_r, o_l),
-        chr_b = .pfx(ifelse(.bnd, ifelse(.five, .m[, 2], CHROM), CHROM)),
-        pos_b = ifelse(.bnd, ifelse(.five, suppressWarnings(as.numeric(.m[, 3])), POS), END),
-        gen_b = ifelse(.bnd & !.five, g_l, g_r),
-        iso_b = ifelse(.bnd & !.five, t_l, t_r),
-        str_b = ifelse(.bnd & !.five, s_l, s_r),
-        bio_b = ifelse(.bnd & !.five, b_l, b_r),
-        src_b = ifelse(.bnd & !.five, o_l, o_r)
-      ) |>
-      # drop non-BND records that have no usable second breakpoint
-      dplyr::filter(!is.na(pos_a), !is.na(pos_b), pos_a != pos_b | .bnd) |>
-      # one row per event: collapse the two breakends of a BND pair
-      dplyr::mutate(.key = paste(SAMPLE,
-                                 pmin(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)),
-                                 pmax(paste0(chr_a, ":", pos_a), paste0(chr_b, ":", pos_b)))) |>
-      dplyr::distinct(.key, .keep_all = TRUE)
+        chr_a = ifelse(.flip, chr_o, chr_t), pos_a = ifelse(.flip, pos_o, pos_t),
+        gen_a = ifelse(.flip, g_r, g_l),     iso_a = ifelse(.flip, t_r, t_l),
+        str_a = ifelse(.flip, s_r, s_l),     bio_a = ifelse(.flip, b_r, b_l),
+        src_a = ifelse(.flip, o_r, o_l),
+        chr_b = ifelse(.flip, chr_t, chr_o), pos_b = ifelse(.flip, pos_t, pos_o),
+        gen_b = ifelse(.flip, g_l, g_r),     iso_b = ifelse(.flip, t_l, t_r),
+        str_b = ifelse(.flip, s_l, s_r),     bio_b = ifelse(.flip, b_l, b_r),
+        src_b = ifelse(.flip, o_l, o_r)
+      )
 
     # A DEL/DUP/INV whose two breakpoints resolve to the SAME gene is an
     # intragenic event, not a two-partner fusion. Emitting it as GENE::GENE is
@@ -3566,57 +3629,32 @@ if (exists("pass2_clean") && is.data.frame(pass2_clean) &&
     # The app draws one tab per named gene and shows data only when at least one
     # breakpoint lies inside a gene (tested in the app 2026-11-18). So:
     #   both breakends inside (gene_source "overlap") two different genes: a
-    #     fusion product. 5'/3' comes from the junction and the gene strands, per
-    #     breakend: the gene contributes its 5' part when the segment kept at the
-    #     junction lies LEFT of the breakpoint and the gene is on "+", or RIGHT and
-    #     on "-". A product needs exactly one 5' and one 3' partner; otherwise the
-    #     join is antisense and is skipped.
+    #     fusion product, 5' gene first (.five / .b_first above). A product needs
+    #     exactly one 5' and one 3' partner; otherwise the join is antisense and
+    #     is skipped.
     #   one breakend intergenic (e.g. BCL11B with the TLX3 region in t(5;14)): the
     #     in-gene partner first, then the intergenic breakend named by its nearest
     #     gene and that gene's strand. There is no fusion transcript, so no 5'/3'.
     #   both breakends intergenic: skipped, the app shows nothing.
-    # Kept side per record type:
-    #   BND  ALT t[p[ / t]p]: this side LEFT;  ]p]t / [p[t: this side RIGHT;
-    #        partner RIGHT when the bracket is "[", LEFT when it is "]"
-    #   DEL  POS LEFT, END RIGHT     DUP  POS RIGHT, END LEFT
-    #   INV  two junctions: POS LEFT + END LEFT, and POS RIGHT + END RIGHT
-    .gf_side <- function(chr, pos, gene, strand, src)
-      list(chr = chr, pos = pos, gene = dplyr::coalesce(gene, ""),
-           strand = dplyr::coalesce(strand, ""), genic = !is.na(src) & src == "overlap")
+    # Every junction gives a line (an INV has two), so a line and its svfusion row
+    # name the same gene first except for an INV's second junction.
     # Returns the line named by its kind ("fusion" / "one_intergenic"), or NA.
     .gf_line <- function(a, ka, b, kb) {
       usable <- function(p) nzchar(p$gene) && p$strand %in% c("+", "-") && !is.na(p$pos)
       if (!usable(a) || !usable(b) || a$gene == b$gene || (!a$genic && !b$genic))
         return(NA_character_)
+      if (a$genic && b$genic && .five(ka, a$strand) == .five(kb, b$strand))
+        return(NA_character_)                          # both 5' or both 3': antisense
       fmt <- function(p) paste(p$gene, p$chr, format(p$pos, scientific = FALSE, trim = TRUE),
                                p$strand, sep = ",")
-      if (a$genic != b$genic) {                          # one intergenic breakend
-        g <- if (a$genic) a else b; n <- if (a$genic) b else a
-        return(c(one_intergenic = paste0(fmt(g), "::", fmt(n))))
-      }
-      five <- function(k, s) (k == "L" && s == "+") || (k == "R" && s == "-")
-      fa <- five(ka, a$strand); fb <- five(kb, b$strand)
-      if (fa == fb) return(NA_character_)              # both 5' or both 3': antisense
-      p5 <- if (fa) a else b; p3 <- if (fa) b else a
-      c(fusion = paste0(fmt(p5), "::", fmt(p3)))
+      line <- if (.b_first(a, ka, b, kb)) paste0(fmt(b), "::", fmt(a)) else paste0(fmt(a), "::", fmt(b))
+      stats::setNames(line, if (a$genic && b$genic) "fusion" else "one_intergenic")
     }
-    .gm <- stringr::str_match(.d$ALT, "[\\[\\]]([^:\\[\\]]+):([0-9]+)[\\[\\]]")
     pp_sv_genefusion <- character(0)
     for (i in seq_len(nrow(.d))) {
-      .this <- .gf_side(.pfx(.d$CHROM[i]), .d$POS[i], .d$g_l[i], .d$s_l[i], .d$o_l[i])
-      .othr <- .gf_side(if (.d$.bnd[i]) .pfx(.gm[i, 2]) else .pfx(.d$CHROM[i]),
-                        if (.d$.bnd[i]) suppressWarnings(as.numeric(.gm[i, 3])) else .d$END[i],
-                        .d$g_r[i], .d$s_r[i], .d$o_r[i])
-      .junctions <- if (.d$.bnd[i]) {
-        list(c(if (grepl("^[ACGTNacgtn]", .d$ALT[i])) "L" else "R",
-               if (grepl("\\[", .d$ALT[i])) "R" else "L"))
-      } else switch(.d$SVTYPE[i],
-        DEL = list(c("L", "R")),
-        DUP = list(c("R", "L")),
-        INV = list(c("L", "L"), c("R", "R")),
-        list())
-      for (k in .junctions)
-        pp_sv_genefusion <- c(pp_sv_genefusion, .gf_line(.this, k[1], .othr, k[2]))
+      s <- .sides(.d, i)
+      for (k in .junctions(.d$.bnd[i], .d$ALT[i], .d$SVTYPE[i]))
+        pp_sv_genefusion <- c(pp_sv_genefusion, .gf_line(s$this, k[1], s$other, k[2]))
     }
     pp_sv_genefusion <- pp_sv_genefusion[!is.na(pp_sv_genefusion)]
     pp_sv_genefusion <- pp_sv_genefusion[!duplicated(pp_sv_genefusion)]
@@ -3682,7 +3720,9 @@ if (!is.null(pp_sv_fusion) && nrow(pp_sv_fusion) > 0) {
 ::: {style="font-size:0.85em; color:#666; margin-top:6px;"}
 SV fusion export &mdash; `r if (!is.null(pp_sv_note)) htmltools::HTML(pp_sv_note) else ""`.
 `r if (!is.null(pp_sv_genefusion_note)) htmltools::HTML(pp_sv_genefusion_note) else ""`
-Genome build `r pp_genome`. BND mate pairs are collapsed to one event; INS is excluded
+Genome build `r pp_genome`. BND mate pairs are collapsed to one event, read from the `_1` record.
+Gene A is the 5' partner when both breakpoints lie in genes joined in sense, else the in-gene
+breakpoint, else the record's own; INS is excluded
 (no second breakpoint); same-gene DEL/DUP/INV are excluded (intragenic, not a fusion).
 An isoform is given only where the breakpoint lies inside a protein-coding gene with an ENST/NM accession — otherwise it is blank per the svfusion spec, and an intergenic breakend has its gene blanked too.
 :::
@@ -4073,7 +4113,7 @@ viz_figure_card <- function(stem, caption, files, max_height) {
 ```{r viz-circos-cohort}
 #| title: "Cohort circos — SV links, copy-number ring, Tier-1 genes"
 cap <- paste0(
-  "Static circos (Circos 0.69). <b>Links</b>: pass-2 SVs, BND mates collapsed; insertions, ",
+  "Static circos (Circos 0.69). <b>Links</b>: pass-2 SVs, a BND pair drawn once from its <code>_1</code> record; insertions, ",
   "SVs on contigs outside the 24 karyotype chromosomes and unparseable breakpoints are not drawn. ",
   "Colour = driver tier (green T1, orange T2, grey T3); thickness = cohort recurrence <code>n_any</code> ",
   "(2p one sample, 4p two, 6p three or four, 8p five or more; 3p when the SV is not in the cluster map ",
